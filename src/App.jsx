@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
 
 const C = {
-  bg: "#0f1410", panel: "#161d18", border: "#263020",
-  green: "#4ade80", greenDim: "#22543d", greenBright: "#86efac",
+  bg: "#f7d93f", panel: "#161d18", border: "#263020",
+  green: "#859556", greenDim: "#22543d", greenBright: "#86efac",
   amber: "#fbbf24", blue: "#60a5fa", red: "#f87171",
   text: "#e2e8e0", textMid: "#8fa88a", textFaint: "#4a5e46",
 };
@@ -18,21 +18,7 @@ function buildOffsets(r) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CA STEP — v² Klausmeier substrate-depletion model
-//
-// Why v² (not v)?
-//   Linear growth (α·v·w) has a stable homogeneous fixed point at v*=1 for all
-//   ecologically relevant R values — every preset saturated. The v² term gives:
-//     • Allee effect: sparse cells (v≈0) can't grow even in wet soil
-//     • Autocatalytic depletion: dense patches starve their wr-radius neighbourhood
-//   Together these produce the short-range activation / long-range inhibition
-//   needed for Turing-type pattern formation.
-//
-// Why d_w must be LOW (0.05–0.10)?
-//   d_w controls how quickly moisture re-equilises after local depletion.
-//   High d_w (>0.15) erases the water shadow within ~5 steps → no spatial
-//   gradient → uniform saturation. Low d_w keeps depletion persistent for
-//   ~10–20 steps, allowing discrete patches to self-organise.
+
 //
 // Empirically validated on 80×80 grid, 500 steps:
 //   R=0.18 → cover≈22%, Moran≈0.03, 800+ tiny fragments  (Near Collapse)
@@ -431,7 +417,7 @@ export default function App() {
                 <span style={{ fontSize:11, color:C.green, fontWeight:700 }}>{gridN} × {gridN}</span>
               </div>
               <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                {[40,60,80,100,120].map(n => (
+                {[40,60,80,100,120,500].map(n => (
                   <button key={n} onClick={() => setGridN(n)} style={{
                     padding:"4px 12px", borderRadius:4, cursor:"pointer", fontSize:11, fontFamily:MONO,
                     background:gridN===n?C.greenDim:"transparent", color:gridN===n?C.greenBright:C.textFaint,

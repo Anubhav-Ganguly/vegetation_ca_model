@@ -1,20 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend, ScatterChart, Scatter } from "recharts";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
 
-// ── Design tokens ────────────────────────────────────────────────
+// ── Palette ──────────────────────────────────────────────────────────────────
 const C = {
-  bg: "#f7f3ec", surface: "#ffffff", border: "#e2d9cc",
-  green: "#2d6a4f", greenDim: "#52b788", amber: "#c4862b",
-  blue: "#3a6ea5", red: "#b5372a", purple: "#6b4ea8",
-  text: "#1c1917", textMid: "#57534e", textFaint: "#a8a29e", ink: "#2d2926",
+  bg: "#0f1410", panel: "#161d18", border: "#263020",
+  green: "#4ade80", greenDim: "#22543d", greenBright: "#86efac",
+  amber: "#fbbf24", blue: "#60a5fa", red: "#f87171",
+  text: "#e2e8e0", textMid: "#8fa88a", textFaint: "#4a5e46",
+  ink: "#f0f4ef",
 };
-const MONO = "'JetBrains Mono', 'Courier New', monospace";
-const SERIF = "'Crimson Pro', Georgia, serif";
+const MONO = "'JetBrains Mono', 'Fira Mono', monospace";
 
-// ── CA constants ─────────────────────────────────────────────────
-const N = 80;
-const CELL = 7;
-
+// ── Build disk offsets ────────────────────────────────────────────────────────
 function buildOffsets(r) {
   const o = [];
   for (let dy = -r; dy <= r; dy++)
@@ -22,29 +19,9 @@ function buildOffsets(r) {
       if (dx * dx + dy * dy <= r * r) o.push([dx, dy]);
   return o;
 }
-const W_OFF = buildOffsets(4);
-const S_OFF = buildOffsets(1);
 
-// ── State initialisation ──────────────────────────────────────────
-function initState(seed = 42) {
-  let s = seed | 0;
-  const rng = () => {
-    s = (s * 1664525 + 1013904223) & 0xffffffff;
-    return (s >>> 0) / 0xffffffff;
-  };
-  const v = new Float32Array(N * N);
-  const w = new Float32Array(N * N);
-  const σ = new Float32Array(N * N);
-  for (let i = 0; i < N * N; i++) {
-    v[i] = rng() < 0.28 ? rng() * 0.6 + 0.2 : 0;
-    w[i] = 0.25 + rng() * 0.25;
-    σ[i] = v[i] > 0 ? 0.4 + rng() * 0.4 : 0.1 + rng() * 0.2;
-  }
-  return { v, w, σ };
-}
-
-// ── CA update ─────────────────────────────────────────────────────
-function caStep(state, p) {
+// ── CA step (N is dynamic) ────────────────────────────────────────────────────
+function caStep(state, p, N, W_OFF, S_OFF) {
   const { v, w, σ } = state;
   const { R, E, alpha, beta, mort, eps, gp, gm } = p;
   const nv = new Float32Array(N * N);
@@ -67,8 +44,23 @@ function caStep(state, p) {
   return { v: nv, w: nw, σ: nσ };
 }
 
-// ── Metrics ───────────────────────────────────────────────────────
-function computeMetrics(state) {
+// ── Init state ────────────────────────────────────────────────────────────────
+function initState(N, seed = 42, initDensity = 0.28) {
+  let s = seed | 0;
+  const rng = () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return (s >>> 0) / 0xffffffff; };
+  const v = new Float32Array(N * N);
+  const w = new Float32Array(N * N);
+  const σ = new Float32Array(N * N);
+  for (let i = 0; i < N * N; i++) {
+    v[i] = rng() < initDensity ? rng() * 0.6 + 0.2 : 0;
+    w[i] = 0.25 + rng() * 0.25;
+    σ[i] = v[i] > 0 ? 0.4 + rng() * 0.4 : 0.1 + rng() * 0.2;
+  }
+  return { v, w, σ };
+}
+
+// ── Metrics ───────────────────────────────────────────────────────────────────
+function computeMetrics(state, N) {
   const { v, w, σ } = state;
   let vS = 0, wS = 0, sS = 0;
   for (let i = 0; i < N * N; i++) { vS += v[i]; wS += w[i]; sS += σ[i]; }
@@ -81,16 +73,14 @@ function computeMetrics(state) {
       const i = y * N + x;
       for (const [dx, dy] of [[1, 0], [0, 1]]) {
         const j = ((y + dy + N) % N) * N + (x + dx + N) % N;
-        moran += (v[i] - vm) * (v[j] - vm);
-        moranC++;
+        moran += (v[i] - vm) * (v[j] - vm); moranC++;
       }
     }
   moran = vvar > 0 ? moran / (moranC * vvar) : 0;
   const thr = 0.15, visited = new Uint8Array(N * N), sizes = [];
   for (let start = 0; start < N * N; start++) {
     if (v[start] < thr || visited[start]) continue;
-    let q = [start], size = 0;
-    visited[start] = 1;
+    let q = [start], size = 0; visited[start] = 1;
     while (q.length) {
       const cur = q.pop(); size++;
       const cy = Math.floor(cur / N), cx = cur % N;
@@ -101,195 +91,146 @@ function computeMetrics(state) {
     }
     sizes.push(size);
   }
-  const maxCluster = sizes.length ? Math.max(...sizes) : 0;
-  const meanCluster = sizes.length ? sizes.reduce((a, b) => a + b, 0) / sizes.length : 0;
-  return { vm, wm, sm, vvar, moran, maxCluster, meanCluster, numClusters: sizes.length };
+  return {
+    vm, wm, sm, vvar, moran,
+    maxCluster: sizes.length ? Math.max(...sizes) : 0,
+    meanCluster: sizes.length ? sizes.reduce((a, b) => a + b, 0) / sizes.length : 0,
+    numClusters: sizes.length,
+  };
 }
 
-// ── Canvas rendering ──────────────────────────────────────────────
+// ── Render canvas ─────────────────────────────────────────────────────────────
 function lerp(a, b, t) { return a + (b - a) * t; }
 function colorVeg(val) {
-  if (val < 0.15) { const t = val / 0.15; return [lerp(235, 200, t), lerp(225, 185, t), lerp(205, 160, t)]; }
-  if (val < 0.50) { const t = (val - 0.15) / 0.35; return [lerp(200, 80, t), lerp(185, 150, t), lerp(160, 80, t)]; }
-  const t = (val - 0.5) / 0.5; return [lerp(80, 15, t), lerp(150, 90, t), lerp(80, 40, t)];
+  if (val < 0.15) { const t = val / 0.15; return [lerp(30, 50, t), lerp(30, 70, t), lerp(25, 40, t)]; }
+  if (val < 0.50) { const t = (val - 0.15) / 0.35; return [lerp(50, 30, t), lerp(70, 160, t), lerp(40, 60, t)]; }
+  const t = (val - 0.5) / 0.5; return [lerp(30, 10, t), lerp(160, 220, t), lerp(60, 80, t)];
 }
-function colorWater(val) { return [lerp(240, 20, val), lerp(230, 90, val), lerp(210, 200, val)]; }
-function colorSigma(val) { return [lerp(240, 100, val), lerp(235, 160, val), lerp(220, 80, val)]; }
+function colorWater(val) { return [lerp(15, 20, val), lerp(20, 100, val), lerp(30, 200, val)]; }
+function colorSigma(val) { return [lerp(20, 160, val), lerp(30, 130, val), lerp(20, 20, val)]; }
 
-function renderCanvas(canvas, state, view) {
+function renderCanvas(canvas, state, view, N) {
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
-  const arr = view === "vegetation" ? state.v : view === "water" ? state.w : state.σ;
-  const cfn = view === "vegetation" ? colorVeg : view === "water" ? colorWater : colorSigma;
-  const img = ctx.createImageData(N * CELL, N * CELL);
+  const size = Math.floor(560 / N);
+  const arr = view === "veg" ? state.v : view === "water" ? state.w : state.σ;
+  const cfn = view === "veg" ? colorVeg : view === "water" ? colorWater : colorSigma;
+  const img = ctx.createImageData(N * size, N * size);
   for (let y = 0; y < N; y++)
     for (let x = 0; x < N; x++) {
       const [r, g, b] = cfn(arr[y * N + x]);
-      for (let py = 0; py < CELL; py++)
-        for (let px = 0; px < CELL; px++) {
-          const pi = ((y * CELL + py) * N * CELL + x * CELL + px) * 4;
+      for (let py = 0; py < size; py++)
+        for (let px = 0; px < size; px++) {
+          const pi = ((y * size + py) * N * size + x * size + px) * 4;
           img.data[pi] = r; img.data[pi + 1] = g; img.data[pi + 2] = b; img.data[pi + 3] = 255;
         }
     }
   ctx.putImageData(img, 0, 0);
 }
 
-// ── Theory predictions ────────────────────────────────────────────
-const DEF = { R: 0.28, E: 0.45, alpha: 3.2, beta: 2.0, mort: 0.18, eps: 0.04, gp: 0.06, gm: 0.03 };
+// ── Presets ───────────────────────────────────────────────────────────────────
+const PRESETS = {
+  "Dense Cover":   { R: 0.50, E: 0.45, alpha: 3.2, beta: 2.0, mort: 0.18, eps: 0.04, gp: 0.06, gm: 0.03, wr: 4, sr: 1 },
+  "Labyrinths":    { R: 0.32, E: 0.45, alpha: 3.2, beta: 2.0, mort: 0.18, eps: 0.04, gp: 0.06, gm: 0.03, wr: 4, sr: 1 },
+  "Spots":         { R: 0.22, E: 0.45, alpha: 3.2, beta: 2.0, mort: 0.18, eps: 0.04, gp: 0.06, gm: 0.03, wr: 4, sr: 1 },
+  "Tiger Stripes": { R: 0.30, E: 0.40, alpha: 3.8, beta: 1.5, mort: 0.15, eps: 0.02, gp: 0.05, gm: 0.02, wr: 6, sr: 1 },
+  "Fairy Circles": { R: 0.38, E: 0.42, alpha: 2.8, beta: 2.5, mort: 0.14, eps: 0.06, gp: 0.07, gm: 0.04, wr: 3, sr: 2 },
+  "Near Collapse": { R: 0.16, E: 0.45, alpha: 3.2, beta: 2.0, mort: 0.18, eps: 0.04, gp: 0.06, gm: 0.03, wr: 4, sr: 1 },
+};
 
-function theory(p) {
-  const { R, E, alpha, beta, mort, gp, gm } = p;
-  const sigma_eq = gp / (gp + gm);
-  const w_bare = R / E;
-  const Rc = (mort * E) / (alpha * sigma_eq);
-  const lambda = 2 * Math.PI * 4 / Math.sqrt((R * alpha) / (mort * E * (1 + beta * 0.25)));
-  const hyst_width = gm / gp;
-  const f_eff = alpha * w_bare * sigma_eq / (1 + beta * w_bare);
-  return { sigma_eq, w_bare, Rc, lambda, hyst_width, f_eff };
-}
+const DEF = PRESETS["Spots"];
 
-// ═══════════════════════════════════════════════════════════════════
-// UI COMPONENTS
-// ═══════════════════════════════════════════════════════════════════
-function Tabs({ active, onChange }) {
-  const tabs = [
-    { id: "sim", label: "🌿 Simulation" },
-    { id: "math", label: "∂ Mathematical Analysis" },
-    { id: "results", label: "📈 Results & Observations" },
-  ];
+// ── Slider ────────────────────────────────────────────────────────────────────
+function Slider({ label, k, min, max, step, params, setParams, format = v => v.toFixed(3) }) {
   return (
-    <div style={{ display: "flex", borderBottom: `1px solid ${C.border}`, marginBottom: 24 }}>
-      {tabs.map(t => (
-        <button key={t.id} onClick={() => onChange(t.id)} style={{
-          padding: "12px 28px", cursor: "pointer", fontFamily: SERIF, fontSize: 15,
-          border: "none", borderBottom: active === t.id ? `3px solid ${C.green}` : "3px solid transparent",
-          background: "transparent", color: active === t.id ? C.green : C.textMid,
-          fontWeight: active === t.id ? 600 : 400, marginBottom: -2, transition: "all 0.15s",
-        }}>
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function Card({ children, style = {} }) {
-  return (
-    <div style={{
-      background: C.surface, border: `1px solid ${C.border}`,
-      borderRadius: 10, padding: "20px 24px", marginBottom: 16, ...style
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function SectionHead({ children }) {
-  return (
-    <div style={{
-      fontFamily: SERIF, fontSize: 18, fontWeight: 700, color: C.ink,
-      marginBottom: 14, marginTop: 8, borderLeft: `3px solid ${C.green}`, paddingLeft: 10
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function MathBox({ children }) {
-  return (
-    <pre style={{
-      fontFamily: MONO, fontSize: 12.5, background: "#faf8f5", border: `1px solid ${C.border}`,
-      borderRadius: 6, padding: "14px 18px", overflowX: "auto", color: C.ink,
-      lineHeight: 1.7, margin: "10px 0",
-    }}>
-      {children}
-    </pre>
-  );
-}
-
-function Slider({ label, symbol, k, min, max, step, note, params, setParams }) {
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-        <span style={{ fontFamily: SERIF, fontSize: 13.5, color: C.text }}>
-          {label} <span style={{ fontFamily: MONO, color: C.textMid, fontSize: 12 }}>({symbol})</span>
-        </span>
-        <span style={{ fontFamily: MONO, fontSize: 13, color: C.green, fontWeight: 600 }}>
-          {params[k].toFixed(3)}
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+        <span style={{ fontSize: 11, color: C.textMid, fontFamily: MONO }}>{label}</span>
+        <span style={{ fontSize: 11, color: C.green, fontFamily: MONO, fontWeight: 600 }}>
+          {format(params[k])}
         </span>
       </div>
       <input type="range" min={min} max={max} step={step} value={params[k]}
         onChange={e => setParams(p => ({ ...p, [k]: +e.target.value }))}
-        style={{ width: "100%", accentColor: C.green, cursor: "pointer" }} />
-      {note && <div style={{ fontSize: 11, color: C.textFaint, marginTop: 3 }}>{note}</div>}
+        style={{ width: "100%", accentColor: C.green, cursor: "pointer", height: 3 }} />
     </div>
   );
 }
 
-function StatTile({ label, value, unit = "", color = C.text }) {
+// ── Stat chip ─────────────────────────────────────────────────────────────────
+function Chip({ label, value, color = C.textMid }) {
   return (
     <div style={{
-      background: "#faf8f5", border: `1px solid ${C.border}`, borderRadius: 8,
-      padding: "10px 14px", flex: 1, minWidth: 90,
+      background: C.panel, border: `1px solid ${C.border}`,
+      borderRadius: 6, padding: "6px 10px", flex: "1 1 80px",
     }}>
-      <div style={{ fontSize: 10, fontFamily: MONO, color: C.textFaint, letterSpacing: "0.06em", marginBottom: 4 }}>
-        {label.toUpperCase()}
+      <div style={{ fontSize: 9, fontFamily: MONO, color: C.textFaint, letterSpacing: "0.08em", marginBottom: 2 }}>
+        {label}
       </div>
-      <div style={{ fontSize: 17, fontFamily: MONO, color, fontWeight: 600 }}>
-        {value} {unit && <span style={{ fontSize: 11, color: C.textFaint }}>{unit}</span>}
-      </div>
+      <div style={{ fontSize: 14, fontFamily: MONO, color, fontWeight: 700 }}>{value}</div>
     </div>
   );
 }
 
-function CompareRow({ quantity, prediction, observed, status }) {
-  const sc = status === "match" ? C.green : status === "partial" ? C.amber : C.textMid;
-  const sl = status === "match" ? "✓" : status === "partial" ? "~" : "—";
-  return (
-    <tr>
-      <td style={{ padding: "8px 12px", fontFamily: SERIF, fontSize: 13.5, borderBottom: `1px solid ${C.border}` }}>{quantity}</td>
-      <td style={{ padding: "8px 12px", fontFamily: MONO, fontSize: 12, color: C.blue, borderBottom: `1px solid ${C.border}` }}>{prediction}</td>
-      <td style={{ padding: "8px 12px", fontFamily: MONO, fontSize: 12, color: C.green, borderBottom: `1px solid ${C.border}` }}>{observed}</td>
-      <td style={{ padding: "8px 12px", fontFamily: MONO, fontSize: 12, color: sc, fontWeight: 700, borderBottom: `1px solid ${C.border}` }}>
-        {sl} {status === "match" ? "Match" : status === "partial" ? "Partial" : "Run sim"}
-      </td>
-    </tr>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// MAIN
-// ═══════════════════════════════════════════════════════════════════
+// ── Main ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab] = useState("sim");
-  const [running, setRunning] = useState(false);
   const [params, setParams] = useState(DEF);
-  const [view, setView] = useState("vegetation");
+  const [gridN, setGridN] = useState(80);
+  const [initDensity, setInitDensity] = useState(0.28);
+  const [view, setView] = useState("veg");
+  const [running, setRunning] = useState(false);
   const [tick, setTick] = useState(0);
-  const [history, setHistory] = useState([]);
   const [metrics, setMetrics] = useState(null);
-  const stateRef = useRef(initState());
+  const [history, setHistory] = useState([]);
+  const [showCharts, setShowCharts] = useState(false);
+
+  const stateRef = useRef(null);
   const canvasRef = useRef(null);
   const animRef = useRef(null);
   const paramsRef = useRef(params);
   const viewRef = useRef(view);
+  const gridNRef = useRef(gridN);
 
+  // keep refs in sync
   useEffect(() => { paramsRef.current = params; }, [params]);
   useEffect(() => { viewRef.current = view; }, [view]);
+  useEffect(() => { gridNRef.current = gridN; }, [gridN]);
+
+  // derived offsets
+  const W_OFF = useRef(buildOffsets(params.wr));
+  const S_OFF = useRef(buildOffsets(params.sr));
+  useEffect(() => { W_OFF.current = buildOffsets(params.wr); }, [params.wr]);
+  useEffect(() => { S_OFF.current = buildOffsets(params.sr); }, [params.sr]);
+
+  // init on mount or N/density change
+  const doReset = useCallback((N = gridNRef.current, density = initDensity) => {
+    setRunning(false);
+    cancelAnimationFrame(animRef.current);
+    stateRef.current = initState(N, Math.random() * 1e6 | 0, density);
+    setTick(0); setHistory([]); setMetrics(null);
+    setTimeout(() => renderCanvas(canvasRef.current, stateRef.current, viewRef.current, N), 0);
+  }, [initDensity]);
+
+  useEffect(() => { doReset(gridN, initDensity); }, [gridN, initDensity]); // eslint-disable-line
+
+  // re-render on view change
+  useEffect(() => {
+    if (stateRef.current) renderCanvas(canvasRef.current, stateRef.current, view, gridNRef.current);
+  }, [view]);
 
   const doStep = useCallback(() => {
-    stateRef.current = caStep(stateRef.current, paramsRef.current);
-    renderCanvas(canvasRef.current, stateRef.current, viewRef.current);
+    const N = gridNRef.current;
+    stateRef.current = caStep(stateRef.current, paramsRef.current, N, W_OFF.current, S_OFF.current);
+    renderCanvas(canvasRef.current, stateRef.current, viewRef.current, N);
     setTick(t => {
       const nt = t + 1;
       if (nt % 5 === 0) {
-        const m = computeMetrics(stateRef.current);
+        const m = computeMetrics(stateRef.current, N);
         setMetrics(m);
-        setHistory(h => [...h.slice(-250), {
+        setHistory(h => [...h.slice(-300), {
           t: nt,
           vm: +m.vm.toFixed(3), wm: +m.wm.toFixed(3), sm: +m.sm.toFixed(3),
           vvar: +m.vvar.toFixed(5), moran: +m.moran.toFixed(3),
-          meanCluster: +m.meanCluster.toFixed(1),
         }]);
       }
       return nt;
@@ -304,562 +245,307 @@ export default function App() {
     return () => cancelAnimationFrame(animRef.current);
   }, [running, doStep]);
 
-  useEffect(() => {
-    renderCanvas(canvasRef.current, stateRef.current, view);
-  }, [view]);
-
-  const reset = () => {
-    setRunning(false);
-    stateRef.current = initState(Math.random() * 1e6 | 0);
-    setTick(0); setHistory([]); setMetrics(null);
-    setTimeout(() => renderCanvas(canvasRef.current, stateRef.current, viewRef.current), 0);
+  const applyPreset = (name) => {
+    const p = PRESETS[name];
+    setParams(p);
+    paramsRef.current = p;
+    W_OFF.current = buildOffsets(p.wr);
+    S_OFF.current = buildOffsets(p.sr);
   };
 
-  const th = theory(params);
   const regime = metrics
-    ? (metrics.vm > 0.40 ? "Vegetated" : metrics.vm > 0.12 ? "Patterned" : "Bare Desert")
-    : "Ready";
-  const rColor = metrics
-    ? (metrics.vm > 0.40 ? C.green : metrics.vm > 0.12 ? C.amber : C.red)
+    ? (metrics.vm > 0.45 ? "Dense Cover" : metrics.vm > 0.20 ? "Patterned" : metrics.vm > 0.05 ? "Sparse / Spots" : "Bare Desert")
+    : "—";
+  const regimeColor = metrics
+    ? (metrics.vm > 0.45 ? C.green : metrics.vm > 0.20 ? C.amber : metrics.vm > 0.05 ? "#f97316" : C.red)
     : C.textFaint;
-  const sp = { params, setParams };
 
-  // ─────────────────────────────────────────────────────────────────
+  const canvasSize = Math.floor(560 / gridN) * gridN;
+
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, padding: "0 0 60px 0", fontFamily: SERIF }}>
-      {/* Header */}
+    <div style={{
+      minHeight: "100vh", background: C.bg, color: C.text,
+      fontFamily: MONO, padding: "0 0 40px 0",
+    }}>
+
+      {/* ── Header ─────────────────────────────────────────────── */}
       <div style={{
-        background: C.surface, borderBottom: `1px solid ${C.border}`,
-        padding: "20px 40px 0 40px", marginBottom: 0,
+        background: C.panel, borderBottom: `1px solid ${C.border}`,
+        padding: "14px 28px", display: "flex", alignItems: "center",
+        justifyContent: "space-between",
       }}>
-        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 16, marginBottom: 4 }}>
-            <h1 style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 700, color: C.ink, margin: 0 }}>
-              Dryland Vegetation — Self-Organisation
-            </h1>
-            <span style={{ fontFamily: MONO, fontSize: 12, color: C.textFaint }}>
-              step t = {tick}
-            </span>
-            <span style={{ fontFamily: MONO, fontSize: 12, fontWeight: 700, color: rColor }}>
-              {regime}
-            </span>
-          </div>
-          <div style={{ fontSize: 12.5, color: C.textFaint, fontFamily: MONO, marginBottom: 14, letterSpacing: "0.03em" }}>
-            Cellular Automaton · Turing Instability · Activator–Inhibitor · Soil Memory Hysteresis
-          </div>
-          <Tabs active={tab} onChange={setTab} />
+        <div>
+          <span style={{ fontSize: 15, fontWeight: 700, color: C.greenBright, letterSpacing: "-0.02em" }}>
+            vegetation ca
+          </span>
+          <span style={{ fontSize: 11, color: C.textFaint, marginLeft: 14 }}>
+            dryland self-organisation
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: C.textFaint }}>t = {tick}</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: regimeColor }}>{regime}</span>
         </div>
       </div>
 
-      <div style={{ maxWidth: 1200, margin: "0 auto", padding: "28px 40px 0 40px" }}>
+      {/* ── Body ───────────────────────────────────────────────── */}
+      <div style={{ display: "flex", gap: 0, maxWidth: 1260, margin: "0 auto", padding: "20px 16px 0" }}>
 
-        {/* ══════════════════════════════ SIMULATION TAB */}
-        {tab === "sim" && (
-          <div style={{ display: "flex", gap: 28, alignItems: "flex-start" }}>
+        {/* ── Left: canvas + view + controls ─────────────────── */}
+        <div style={{ flex: "0 0 auto" }}>
 
-            {/* Left — grid */}
-            <div style={{ flex: "0 0 auto" }}>
-              <Card style={{ padding: 16 }}>
-                {/* View selector */}
-                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-                  {["vegetation", "water", "soil"].map(vw => (
-                    <button key={vw} onClick={() => setView(vw)} style={{
-                      padding: "6px 16px", cursor: "pointer", fontSize: 12, borderRadius: 20,
-                      fontFamily: MONO, letterSpacing: "0.04em",
-                      background: view === vw ? C.green : C.surface,
-                      color: view === vw ? "#fff" : C.textMid,
-                      border: `1px solid ${view === vw ? C.green : C.border}`,
-                      transition: "all 0.12s",
-                    }}>
-                      {vw}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Canvas */}
-                <canvas ref={canvasRef} width={N * CELL} height={N * CELL}
-                  style={{ display: "block", borderRadius: 4, border: `1px solid ${C.border}` }} />
-
-                {/* Legend */}
-                <div style={{ marginTop: 8, fontSize: 11, fontFamily: MONO, color: C.textFaint }}>
-                  {view === "vegetation" && "Dark green = dense biomass · Sandy = bare soil"}
-                  {view === "water" && "Blue = high water content · Pale = dry"}
-                  {view === "soil" && "Yellow-green = high infiltration capacity (σ)"}
-                </div>
-
-                {/* Buttons */}
-                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                  <button onClick={() => setRunning(r => !r)} style={{
-                    flex: 1, padding: "12px 0", cursor: "pointer", fontSize: 16,
-                    fontFamily: SERIF, fontWeight: 600, borderRadius: 8,
-                    background: running ? "#fef2f2" : "#edf7f1",
-                    color: running ? C.red : C.green,
-                    border: `2px solid ${running ? C.red : C.green}`,
-                    transition: "all 0.12s",
-                  }}>
-                    {running ? "⏸ Pause" : "▶ Run"}
-                  </button>
-                  <button onClick={doStep} style={{
-                    padding: "12px 18px", cursor: "pointer", fontSize: 14,
-                    fontFamily: SERIF, borderRadius: 8,
-                    background: C.surface, color: C.textMid, border: `1px solid ${C.border}`,
-                  }}>
-                    Step
-                  </button>
-                  <button onClick={reset} style={{
-                    padding: "12px 18px", cursor: "pointer", fontSize: 14,
-                    fontFamily: SERIF, borderRadius: 8,
-                    background: C.surface, color: C.textMid, border: `1px solid ${C.border}`,
-                  }}>
-                    Reset
-                  </button>
-                </div>
-              </Card>
-
-              {/* Live theory box */}
-              <Card style={{ padding: "14px 18px" }}>
-                <div style={{ fontSize: 10, fontFamily: MONO, color: C.textFaint, letterSpacing: "0.08em", marginBottom: 10 }}>
-                  LIVE THEORETICAL PREDICTIONS
-                </div>
-                {[
-                  ["Pattern wavelength λ*", `${th.lambda.toFixed(1)} cells`],
-                  ["Collapse threshold R_c", `${th.Rc.toFixed(3)}` + (params.R < th.Rc + 0.03 ? " ← near!" : "")],
-                  ["Soil equilibrium σ*", `${th.sigma_eq.toFixed(3)}`],
-                  ["Hysteresis width ∝ γ⁻/γ⁺", `${th.hyst_width.toFixed(2)}`],
-                ].map(([l, v]) => (
-                  <div key={l} style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                    <span style={{ fontSize: 12, fontFamily: MONO, color: C.textMid }}>{l}</span>
-                    <span style={{ fontSize: 12, fontFamily: MONO, color: C.green, fontWeight: 600 }}>{v}</span>
-                  </div>
-                ))}
-              </Card>
-            </div>
-
-            {/* Right — params + state */}
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <Card>
-                <SectionHead>Live State</SectionHead>
-                {metrics ? (
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 4 }}>
-                    <StatTile label="Veg cover" value={(metrics.vm * 100).toFixed(1)} unit="%" color={C.green} />
-                    <StatTile label="Soil water" value={metrics.wm.toFixed(3)} color={C.blue} />
-                    <StatTile label="Soil memory" value={metrics.sm.toFixed(3)} color={C.amber} />
-                    <StatTile label="Spatial var" value={metrics.vvar.toFixed(4)} color={metrics.vvar > 0.05 ? C.red : C.textMid} />
-                    <StatTile label="Moran's I" value={metrics.moran.toFixed(3)} color={metrics.moran > 0.1 ? C.purple : C.textMid} />
-                    <StatTile label="Patches" value={metrics.numClusters} color={C.textMid} />
-                    <StatTile label="Max cluster" value={metrics.maxCluster} unit="cells" color={C.textMid} />
-                  </div>
-                ) : (
-                  <div style={{ color: C.textFaint, fontFamily: MONO, fontSize: 13, padding: "12px 0" }}>
-                    Press Run or Step to begin…
-                  </div>
-                )}
-              </Card>
-
-              <Card>
-                <SectionHead>Parameters</SectionHead>
-                <Slider label="Rainfall" symbol="R" k="R" min={0.05} max={0.60} step={0.005}
-                  note="Key bifurcation parameter. Decrease slowly to trigger patterning → collapse." {...sp} />
-                <Slider label="Evaporation" symbol="E" k="E" min={0.1} max={0.9} step={0.01} {...sp} />
-                <Slider label="Plant uptake" symbol="α" k="alpha" min={0.5} max={6.0} step={0.1}
-                  note="Water-to-biomass conversion efficiency." {...sp} />
-                <Slider label="Saturation" symbol="β" k="beta" min={0.2} max={5.0} step={0.1}
-                  note="Holling-II saturation constant." {...sp} />
-                <Slider label="Mortality" symbol="m" k="mort" min={0.02} max={0.50} step={0.005} {...sp} />
-                <Slider label="Seed dispersal" symbol="ε" k="eps" min={0.0} max={0.15} step={0.005} {...sp} />
-                <Slider label="Soil recovery" symbol="γ⁺" k="gp" min={0.01} max={0.15} step={0.005}
-                  note="Plant-driven soil crust improvement. Slow (0.01–0.10)." {...sp} />
-                <Slider label="Soil degradation" symbol="γ⁻" k="gm" min={0.005} max={0.10} step={0.005}
-                  note="Bare-patch crust breakdown. γ⁻/γ⁺ sets hysteresis width." {...sp} />
-                <div style={{
-                  marginTop: 14, padding: "10px 14px", background: "#fef9f0",
-                  borderRadius: 8, border: `1px solid #e8d8b0`, fontSize: 12.5,
-                  fontFamily: SERIF, color: C.amber, lineHeight: 1.6,
-                }}>
-                  💡 Experiment: Slowly drag <strong>Rainfall (R)</strong> down to trigger the desertification cascade:
-                  dense → labyrinths → spots → bare. Watch spatial variance spike before the tipping point.
-                </div>
-              </Card>
-            </div>
+          {/* View toggle */}
+          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+            {[["veg", "vegetation"], ["water", "water"], ["soil", "soil σ"]].map(([id, label]) => (
+              <button key={id} onClick={() => setView(id)} style={{
+                padding: "5px 14px", borderRadius: 4, cursor: "pointer",
+                fontFamily: MONO, fontSize: 11, letterSpacing: "0.04em",
+                background: view === id ? C.greenDim : "transparent",
+                color: view === id ? C.greenBright : C.textFaint,
+                border: `1px solid ${view === id ? C.green : C.border}`,
+                transition: "all 0.1s",
+              }}>
+                {label}
+              </button>
+            ))}
           </div>
-        )}
 
-        {/* ══════════════════════════════ MATH TAB */}
-        {tab === "math" && (
-          <div style={{ maxWidth: 820 }}>
-            <Card>
-              <p style={{ fontFamily: SERIF, fontSize: 15, lineHeight: 1.75, color: C.text, margin: 0 }}>
-                This Cellular Automaton discretises the <strong>Klausmeier–Gray–Scott</strong> family of dryland vegetation PDEs,
-                enriched with a novel slow variable <em>σ</em> (soil memory) that the PDE literature largely ignores.
-                The model exhibits Turing pattern formation, fold bifurcations, and percolation criticality —
-                all of which are rigorously provable from the equations below.
-              </p>
-            </Card>
+          {/* Canvas */}
+          <canvas
+            ref={canvasRef}
+            width={canvasSize} height={canvasSize}
+            style={{
+              display: "block", borderRadius: 6,
+              border: `1px solid ${C.border}`,
+              imageRendering: "pixelated",
+            }}
+          />
 
-            {/* — Three fields — */}
-            <SectionHead>The Three Coupled Fields</SectionHead>
-            <div style={{ display: "flex", gap: 14, marginBottom: 20, flexWrap: "wrap" }}>
-              {[
-                { sym: "v(x,t)", name: "Vegetation biomass", color: C.green, role: "ACTIVATOR", desc: "Self-amplifying. Dense vegetation improves local soil infiltration, attracting still more growth at the same site — a positive feedback." },
-                { sym: "w(x,t)", name: "Soil water content", color: C.blue, role: "INHIBITOR", desc: "Diffuses laterally (subsurface flow). Plants deplete water over a larger radius than they enrich soil, creating long-range competition — the inhibitor." },
-                { sym: "σ(x,t)", name: "Soil memory", color: C.amber, role: "SLOW VARIABLE", desc: "Novel addition. Represents infiltration capacity (biological soil crust state). Plants build it up; bare soil degrades it. Evolves ~10× slower than v, w." },
-              ].map(f => (
-                <Card key={f.sym} style={{ flex: 1, minWidth: 220, padding: "14px 18px" }}>
-                  <div style={{ fontFamily: MONO, fontSize: 16, color: f.color, fontWeight: 700, marginBottom: 2 }}>{f.sym}</div>
-                  <div style={{ fontFamily: MONO, fontSize: 10, color: f.color, letterSpacing: "0.08em", marginBottom: 6 }}>{f.role}</div>
-                  <div style={{ fontFamily: SERIF, fontSize: 13, fontWeight: 600, marginBottom: 6, color: C.ink }}>{f.name}</div>
-                  <div style={{ fontFamily: SERIF, fontSize: 13, color: C.textMid, lineHeight: 1.6 }}>{f.desc}</div>
-                </Card>
+          {/* Run controls */}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button onClick={() => setRunning(r => !r)} style={{
+              flex: 1, padding: "9px 0", borderRadius: 5, cursor: "pointer",
+              fontSize: 13, fontFamily: MONO, fontWeight: 700,
+              background: running ? "#3d1515" : "#0f2d1a",
+              color: running ? C.red : C.green,
+              border: `1px solid ${running ? C.red : C.green}`,
+            }}>
+              {running ? "■ stop" : "▶ run"}
+            </button>
+            <button onClick={doStep} style={{
+              padding: "9px 16px", borderRadius: 5, cursor: "pointer",
+              fontSize: 13, fontFamily: MONO,
+              background: "transparent", color: C.textMid, border: `1px solid ${C.border}`,
+            }}>step</button>
+            <button onClick={() => doReset(gridN, initDensity)} style={{
+              padding: "9px 16px", borderRadius: 5, cursor: "pointer",
+              fontSize: 13, fontFamily: MONO,
+              background: "transparent", color: C.textMid, border: `1px solid ${C.border}`,
+            }}>reset</button>
+          </div>
+
+          {/* Stats */}
+          {metrics && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 12 }}>
+              <Chip label="veg cover" value={`${(metrics.vm * 100).toFixed(1)}%`} color={C.green} />
+              <Chip label="soil water" value={metrics.wm.toFixed(3)} color={C.blue} />
+              <Chip label="soil σ" value={metrics.sm.toFixed(3)} color={C.amber} />
+              <Chip label="spatial var" value={metrics.vvar.toFixed(4)} color={metrics.vvar > 0.04 ? C.red : C.textMid} />
+              <Chip label="moran I" value={metrics.moran.toFixed(3)} color={metrics.moran > 0.1 ? C.greenBright : C.textMid} />
+              <Chip label="patches" value={metrics.numClusters} />
+              <Chip label="max cluster" value={`${((metrics.maxCluster / (gridN * gridN)) * 100).toFixed(1)}%`} />
+            </div>
+          )}
+
+          {/* Charts toggle */}
+          <button onClick={() => setShowCharts(s => !s)} style={{
+            marginTop: 12, width: "100%", padding: "7px 0", borderRadius: 5,
+            cursor: "pointer", fontSize: 11, fontFamily: MONO,
+            background: "transparent", color: C.textFaint,
+            border: `1px solid ${C.border}`,
+          }}>
+            {showCharts ? "▲ hide charts" : "▼ show charts"}
+          </button>
+
+          {showCharts && history.length > 5 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 10, color: C.textFaint, marginBottom: 4 }}>mean-field dynamics</div>
+              <ResponsiveContainer width={canvasSize} height={130}>
+                <LineChart data={history} margin={{ top: 4, right: 4, bottom: 4, left: -20 }}>
+                  <XAxis dataKey="t" tick={{ fontSize: 9, fill: C.textFaint }} />
+                  <YAxis tick={{ fontSize: 9, fill: C.textFaint }} domain={[0, 1]} />
+                  <Tooltip contentStyle={{ background: C.panel, border: `1px solid ${C.border}`, fontSize: 11 }} />
+                  <Legend wrapperStyle={{ fontSize: 10 }} />
+                  <Line type="monotone" dataKey="vm" name="v̄" stroke={C.green} dot={false} strokeWidth={1.5} />
+                  <Line type="monotone" dataKey="wm" name="w̄" stroke={C.blue} dot={false} strokeWidth={1.5} />
+                  <Line type="monotone" dataKey="sm" name="σ̄" stroke={C.amber} dot={false} strokeWidth={1.5} />
+                </LineChart>
+              </ResponsiveContainer>
+              <div style={{ fontSize: 10, color: C.textFaint, marginTop: 8, marginBottom: 4 }}>early-warning signals</div>
+              <ResponsiveContainer width={canvasSize} height={110}>
+                <LineChart data={history} margin={{ top: 4, right: 4, bottom: 4, left: -20 }}>
+                  <XAxis dataKey="t" tick={{ fontSize: 9, fill: C.textFaint }} />
+                  <YAxis tick={{ fontSize: 9, fill: C.textFaint }} />
+                  <Tooltip contentStyle={{ background: C.panel, border: `1px solid ${C.border}`, fontSize: 11 }} />
+                  <Legend wrapperStyle={{ fontSize: 10 }} />
+                  <Line type="monotone" dataKey="vvar" name="variance" stroke={C.red} dot={false} strokeWidth={1.5} />
+                  <Line type="monotone" dataKey="moran" name="moran I" stroke={C.greenBright} dot={false} strokeWidth={1.5} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+
+        {/* ── Right: parameters ───────────────────────────────── */}
+        <div style={{
+          flex: 1, marginLeft: 20, minWidth: 0,
+          display: "flex", flexDirection: "column", gap: 14,
+        }}>
+
+          {/* Presets */}
+          <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 10, color: C.textFaint, letterSpacing: "0.1em", marginBottom: 10 }}>
+              PATTERN PRESETS
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {Object.keys(PRESETS).map(name => (
+                <button key={name} onClick={() => applyPreset(name)} style={{
+                  padding: "5px 12px", borderRadius: 4, cursor: "pointer",
+                  fontSize: 11, fontFamily: MONO,
+                  background: "transparent", color: C.textMid,
+                  border: `1px solid ${C.border}`,
+                  transition: "all 0.1s",
+                }}
+                  onMouseEnter={e => { e.target.style.borderColor = C.green; e.target.style.color = C.green; }}
+                  onMouseLeave={e => { e.target.style.borderColor = C.border; e.target.style.color = C.textMid; }}>
+                  {name}
+                </button>
               ))}
             </div>
+          </div>
 
-            {/* — Equations — */}
-            <SectionHead>Update Equations (Discrete-Time CA)</SectionHead>
-            <Card>
-              <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.textMid, marginBottom: 10 }}>
-                All cells update synchronously. Periodic boundary conditions on an N×N torus.
-              </p>
-              <MathBox>{`w(t+1) = w + R − E·w − v·w·(1+σ) + D_w · Σ_{j∈B(4)} [w_j − w]
-              ↑      ↑      ↑            ↑                     ↑
-           rainfall evap plant uptake            lateral flow (r=4 kernel)
-
-v(t+1) = v + [αwσ/(1+βw)]·v − m·v + ε · v̄_B(1) · (1−v)
-                   ↑                   ↑       ↑
-        Holling-II growth (×soil quality) mortality seed dispersal (r=1)
-
-σ(t+1) = σ + γ⁺·v·(1−σ) − γ⁻·(1−v)·σ
-                   ↑                  ↑
-     plant-driven recovery     bare-patch crust formation
-          (γ⁺ ≪ 1, slow)          (γ⁻ ≪ 1, slow)`}</MathBox>
-              <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.textMid, lineHeight: 1.7, marginTop: 10 }}>
-                The σ equation is the key novelty. Because γ⁺ and γ⁻ are both small (≪ 1), σ evolves
-                roughly 1/(γ⁺+γ⁻) ≈ {(1 / (DEF.gp + DEF.gm)).toFixed(0)} steps to equilibrate — much slower than v and w.
-                This timescale separation defines a <em>slow manifold</em> and causes hysteresis: soil degraded
-                by past bare periods resists recolonisation even when water is restored.
-              </p>
-            </Card>
-
-            {/* — Turing — */}
-            <SectionHead>Turing Instability — Why Patterns Form</SectionHead>
-            <Card>
-              <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.textMid, lineHeight: 1.7, marginBottom: 10 }}>
-                Patterns emerge when the spatially uniform steady state (v*, w*, σ*) is stable to uniform
-                perturbations but unstable to spatially periodic ones. Taking the continuum limit of the v–w
-                subsystem and linearising with perturbation ~ e^(ik·x + λt), the Jacobian in Fourier space is:
-              </p>
-              <MathBox>{`J(k) = | f_v − m,               f_w · v*              |
-       | −w*(1+σ*),  −E − v*(1+σ*) − Λ̂(k) |
-where Λ̂(k) = Λ₀ · J₁(k·r)/(k·r) — Fourier transform of disk kernel, r = 4`}</MathBox>
-              <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.textMid, lineHeight: 1.7, margin: "10px 0" }}>
-                The Turing conditions require:
-              </p>
-              <MathBox>{`(1) tr J(0) < 0 and det J(0) > 0  →  uniform state is stable
-(2) ∃ k* > 0 such that det J(k*) < 0  →  spatial modes are unstable
-Condition (2) requires the inhibitor (water) to diffuse faster than the activator (vegetation).
-This is always satisfied here since vegetation has D_v = 0 (no diffusion, only seed dispersal).`}</MathBox>
-              <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.textMid, lineHeight: 1.7, marginTop: 10 }}>
-                Minimising det J(k) over k gives the characteristic wavenumber k* and wavelength:
-              </p>
-              <MathBox>{`λ* = 2π/k* ≈ 2π·r_kernel / √(Λ₀ / m·E)
-With current parameters: λ* ≈ ${th.lambda.toFixed(1)} cells
-(Verify by counting average spacing between patches/stripes on the grid)`}</MathBox>
-            </Card>
-
-            {/* — Bistability — */}
-            <SectionHead>Bistability and Hysteresis (Slow Manifold Theory)</SectionHead>
-            <Card>
-              <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.textMid, lineHeight: 1.7 }}>
-                Fixing σ at its equilibrium σ* = γ⁺/(γ⁺+γ⁻) = {th.sigma_eq.toFixed(3)}, the fast (v, w)
-                subsystem has a fold bifurcation in rainfall R. Two stable branches coexist for intermediate R values:
-              </p>
-              <div style={{ display: "flex", gap: 12, margin: "14px 0", flexWrap: "wrap" }}>
-                {[
-                  { label: "FORWARD PATH (increasing drought)", color: C.red, text: `As R decreases below R_c ≈ ${th.Rc.toFixed(3)}, the vegetated branch vanishes. System jumps catastrophically to bare desert — an irreversible tipping point at this rainfall level.` },
-                  { label: "BACKWARD PATH (restoration)", color: C.blue, text: `Restoring rainfall does not recover vegetation at R_c. You must raise R further, to R_c + ΔR. Hysteresis width ΔR ∝ γ⁻/γ⁺ = ${th.hyst_width.toFixed(2)}. Larger ratio → harder to reverse desertification.` },
-                ].map(item => (
-                  <div key={item.label} style={{
-                    flex: 1, minWidth: 260, background: "#faf8f5",
-                    borderLeft: `3px solid ${item.color}`, borderRadius: "0 6px 6px 0",
-                    padding: "12px 16px",
+          {/* Grid settings */}
+          <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 10, color: C.textFaint, letterSpacing: "0.1em", marginBottom: 12 }}>
+              GRID & INITIAL CONDITIONS
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                <span style={{ fontSize: 11, color: C.textMid }}>grid size (N)</span>
+                <span style={{ fontSize: 11, color: C.green, fontWeight: 700 }}>{gridN} × {gridN}</span>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {[40, 60, 80, 100, 120].map(n => (
+                  <button key={n} onClick={() => setGridN(n)} style={{
+                    padding: "4px 12px", borderRadius: 4, cursor: "pointer",
+                    fontSize: 11, fontFamily: MONO,
+                    background: gridN === n ? C.greenDim : "transparent",
+                    color: gridN === n ? C.greenBright : C.textFaint,
+                    border: `1px solid ${gridN === n ? C.green : C.border}`,
                   }}>
-                    <div style={{ fontFamily: MONO, fontSize: 10, color: item.color, letterSpacing: "0.07em", marginBottom: 6 }}>{item.label}</div>
-                    <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.text, lineHeight: 1.65, margin: 0 }}>{item.text}</p>
-                  </div>
+                    {n}
+                  </button>
                 ))}
               </div>
-              <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.textMid, lineHeight: 1.7, marginTop: 8 }}>
-                This is proven via <em>geometric singular perturbation theory</em> (Fenichel 1979): for ε = γ⁺ + γ⁻ ≪ 1,
-                the actual trajectories are O(ε)-close to the slow manifold M₀ until they reach the fold point,
-                where they fall off in finite time regardless of how slowly R changes. The σ equation explicitly
-                widens the bistable parameter range compared to models without it — a rigorous and ecologically important result.
-              </p>
-            </Card>
-
-            {/* — Percolation — */}
-            <SectionHead>Percolation Theory at the Tipping Point</SectionHead>
-            <Card>
-              <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.textMid, lineHeight: 1.7, marginBottom: 10 }}>
-                Near R_c, vegetated cells form clusters that progressively lose connectivity.
-                At R_c itself, this is a standard 2D site percolation transition with exact critical exponents:
-              </p>
-              <MathBox>{`Cluster size distribution: P(s) ~ s^(−τ),     τ = 187/91 ≈ 2.055
-Correlation length:        ξ ~ |R − R_c|^(−ν),  ν = 4/3
-Mean cluster size diverges: ⟨s⟩ ~ |R − R_c|^(−γ), γ = 43/18 ≈ 2.389`}</MathBox>
-              <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.textMid, lineHeight: 1.7, marginTop: 10 }}>
-                These exponents are exact results from conformal field theory of 2D percolation (Nienhuis 1982).
-                In simulation: as R → R_c, cluster size distribution flattens toward a power law,
-                mean cluster size peaks, and Moran's I (spatial autocorrelation) diverges — the practical
-                early-warning signal for the coming collapse.
-              </p>
-            </Card>
-
-            {/* — Phases — */}
-            <SectionHead>Pattern Phase Diagram</SectionHead>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              {[
-                { phase: "Dense Cover", R: "R > 0.40", bg: "#1a5c38", desc: "Continuous canopy. Homogeneous steady state. Turing instability is below threshold — no patterns." },
-                { phase: "Labyrinths", R: "0.28–0.40", bg: "#3d7d5a", desc: "Connected maze-like stripes. The Turing wavelength λ* sets the stripe width." },
-                { phase: "Spots", R: "0.15–0.28", bg: "#6a9e72", desc: "Isolated vegetation patches on a bare background. Classic Turing spots, spacing ≈ λ*." },
-                { phase: "Bare Desert", R: "R < 0.15", bg: "#8b6a50", desc: "Vegetation collapse. Bare-soil attractor. Hysteresis: recovery needs R ≫ 0.15." },
-              ].map(p => (
-                <div key={p.phase} style={{
-                  flex: 1, minWidth: 160, background: p.bg, borderRadius: 8,
-                  padding: "14px 16px", color: "#fff",
-                }}>
-                  <div style={{ fontFamily: SERIF, fontSize: 15, fontWeight: 700, marginBottom: 3 }}>{p.phase}</div>
-                  <div style={{ fontFamily: MONO, fontSize: 11, opacity: 0.85, marginBottom: 8 }}>{p.R}</div>
-                  <div style={{ fontFamily: SERIF, fontSize: 12.5, opacity: 0.9, lineHeight: 1.55 }}>{p.desc}</div>
-                </div>
-              ))}
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                <span style={{ fontSize: 11, color: C.textMid }}>initial veg density</span>
+                <span style={{ fontSize: 11, color: C.green, fontWeight: 700 }}>{(initDensity * 100).toFixed(0)}%</span>
+              </div>
+              <input type="range" min={0.05} max={0.70} step={0.05} value={initDensity}
+                onChange={e => setInitDensity(+e.target.value)}
+                style={{ width: "100%", accentColor: C.green, cursor: "pointer", height: 3 }} />
             </div>
           </div>
-        )}
 
-        {/* ══════════════════════════════ RESULTS TAB */}
-        {tab === "results" && (
-          <div>
-            {history.length < 10 ? (
-              <Card style={{ textAlign: "center", padding: "60px 40px" }}>
-                <div style={{ fontSize: 48, marginBottom: 16 }}>🌿</div>
-                <div style={{ fontFamily: SERIF, fontSize: 20, color: C.textMid, marginBottom: 8 }}>No data yet</div>
-                <div style={{ fontFamily: SERIF, fontSize: 14, color: C.textFaint }}>
-                  Go to the Simulation tab → press Run → let it evolve for a while.
-                </div>
-              </Card>
-            ) : (
-              <>
-                {/* Theory vs simulation comparison */}
-                <SectionHead>Theory vs. Simulation — Predictions and Observations</SectionHead>
-
-                {/* Turing patterns */}
-                <Card>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                    <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 700, color: C.ink }}>1. Turing Pattern Formation</div>
-                    <span style={{ fontFamily: MONO, fontSize: 11, color: C.green, background: "#edf7f1", padding: "3px 10px", borderRadius: 20 }}>✓ Strong agreement</span>
-                  </div>
-                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                    {[
-                      { label: "THEORY PREDICTS", color: C.blue, text: `Random initial conditions spontaneously organise into periodic spatial patterns. Predicted wavelength λ* ≈ ${th.lambda.toFixed(1)} cells. Patterns appear within ~100–300 steps. Moran's I should be positive and significantly above zero.` },
-                      { label: "SIMULATION SHOWS", color: C.green, text: `Moran's I = ${metrics?.moran.toFixed(3)} (${metrics?.moran > 0.1 ? "✓ strong clustering" : metrics?.moran > 0 ? "weak clustering" : "no clustering"}). ${metrics?.numClusters} distinct patches detected. Spatial variance = ${metrics?.vvar.toFixed(5)}. ${metrics?.moran > 0.1 ? "Pattern formation confirmed." : "Patterns not yet developed — run longer or adjust R."}` },
-                    ].map(item => (
-                      <div key={item.label} style={{ flex: 1, minWidth: 260 }}>
-                        <div style={{ fontFamily: MONO, fontSize: 10, color: item.color, letterSpacing: "0.08em", marginBottom: 6 }}>{item.label}</div>
-                        <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.text, lineHeight: 1.65, margin: 0 }}>{item.text}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ marginTop: 12, padding: "10px 14px", background: "#f0f4fa", borderRadius: 6, fontSize: 12.5, fontFamily: SERIF, color: C.blue, lineHeight: 1.6 }}>
-                    <strong>What to verify:</strong> Count average spacing between patches on the Simulation grid.
-                    It should be within ±25% of λ* = {th.lambda.toFixed(1)} cells.
-                    Moran's I &gt; 0.1 confirms supra-cell spatial autocorrelation consistent with Turing mechanism.
-                  </div>
-                </Card>
-
-                {/* Soil memory */}
-                <Card>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                    <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 700, color: C.ink }}>2. Soil Memory Timescale Separation</div>
-                    <span style={{ fontFamily: MONO, fontSize: 11, color: C.amber, background: "#fef9f0", padding: "3px 10px", borderRadius: 20 }}>~ Context-dependent</span>
-                  </div>
-                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                    {[
-                      { label: "THEORY PREDICTS", color: C.blue, text: `σ equilibrates to σ* = γ⁺/(γ⁺+γ⁻) = ${th.sigma_eq.toFixed(3)}, but on a timescale ~${(1 / (DEF.gp + DEF.gm)).toFixed(0)} steps — much slower than v, w. After sudden rainfall change, vegetation adjusts quickly but soil memory lags, creating a transient buffer against collapse.` },
-                      { label: "SIMULATION SHOWS", color: C.green, text: `Current σ̄ = ${metrics?.sm.toFixed(3)} vs. σ* = ${th.sigma_eq.toFixed(3)}. ${metrics && Math.abs(metrics.sm - th.sigma_eq) < 0.05 ? "Close to equilibrium — soil memory has converged." : "Still transient — soil memory is tracking vegetation with lag."} See it in the time series: σ curve lags behind the v curve.` },
-                    ].map(item => (
-                      <div key={item.label} style={{ flex: 1, minWidth: 260 }}>
-                        <div style={{ fontFamily: MONO, fontSize: 10, color: item.color, letterSpacing: "0.08em", marginBottom: 6 }}>{item.label}</div>
-                        <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.text, lineHeight: 1.65, margin: 0 }}>{item.text}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ marginTop: 12, padding: "10px 14px", background: "#fef9f0", borderRadius: 6, fontSize: 12.5, fontFamily: SERIF, color: C.amber, lineHeight: 1.6 }}>
-                    <strong>Experiment:</strong> Run to equilibrium. Then suddenly drop R by 0.08.
-                    Observe: v drops fast within ~20 steps, but σ takes ~{(1 / (DEF.gp + DEF.gm)).toFixed(0)} steps to follow.
-                    This lag buffers vegetation temporarily — exactly the hysteresis mechanism.
-                  </div>
-                </Card>
-
-                {/* Early warning */}
-                <Card>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                    <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 700, color: C.ink }}>3. Spatial Variance as Early Warning Signal</div>
-                    <span style={{ fontFamily: MONO, fontSize: 11, color: C.green, background: "#edf7f1", padding: "3px 10px", borderRadius: 20 }}>✓ Predicted and observed</span>
-                  </div>
-                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                    {[
-                      { label: "THEORY PREDICTS", color: C.blue, text: `Critical slowing down near R_c ≈ ${th.Rc.toFixed(3)} causes spatial variance and Moran's I to rise monotonically, then peak at the bifurcation, then collapse suddenly to near-zero when the system tips to bare desert.` },
-                      { label: "SIMULATION SHOWS", color: C.green, text: `Spatial variance = ${metrics?.vvar.toFixed(5)}. ${metrics?.vvar > 0.05 ? "⚠ High — near a tipping point. Watch for sudden collapse." : metrics?.vvar > 0.01 ? "Moderate — in the patterned regime." : "Low — stable state far from tipping."}` },
-                    ].map(item => (
-                      <div key={item.label} style={{ flex: 1, minWidth: 260 }}>
-                        <div style={{ fontFamily: MONO, fontSize: 10, color: item.color, letterSpacing: "0.08em", marginBottom: 6 }}>{item.label}</div>
-                        <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.text, lineHeight: 1.65, margin: 0 }}>{item.text}</p>
-                      </div>
-                    ))}
-                  </div>
-                  <div style={{ marginTop: 12, padding: "10px 14px", background: "#f0f4fa", borderRadius: 6, fontSize: 12.5, fontFamily: SERIF, color: C.blue, lineHeight: 1.6 }}>
-                    <strong>Experiment:</strong> Run until steady state. Then slowly decrease R in steps of 0.01,
-                    waiting ~50 steps between changes. Watch the Spatial Variance chart below.
-                    You should see a clear peak near R ≈ {th.Rc.toFixed(3)} before sudden collapse — the early warning signal.
-                  </div>
-                </Card>
-
-                {/* Percolation */}
-                <Card>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                    <div style={{ fontFamily: SERIF, fontSize: 16, fontWeight: 700, color: C.ink }}>4. Percolation of the Vegetation Network</div>
-                    <span style={{ fontFamily: MONO, fontSize: 11, color: C.amber, background: "#fef9f0", padding: "3px 10px", borderRadius: 20 }}>~ Verify by decreasing R</span>
-                  </div>
-                  <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                    {[
-                      { label: "THEORY PREDICTS", color: C.blue, text: `At R_c ≈ ${th.Rc.toFixed(3)}, the vegetation network loses spanning connectivity. Mean patch size diverges ∝ |R−R_c|^(−43/18). Maximum cluster drops from >30% of grid to <5% at the transition.` },
-                      { label: "SIMULATION SHOWS", color: C.green, text: `Max cluster = ${metrics?.maxCluster} cells (${metrics ? (metrics.maxCluster / (N * N) * 100).toFixed(1) : "—"}% of grid). Mean cluster = ${metrics?.meanCluster.toFixed(1)} cells. ${metrics?.maxCluster > N * N * 0.3 ? "Large spanning cluster — well above percolation threshold." : metrics?.maxCluster > N * N * 0.05 ? "Clusters fragmenting — approaching percolation threshold." : "Only small isolated clusters — below percolation threshold."}` },
-                    ].map(item => (
-                      <div key={item.label} style={{ flex: 1, minWidth: 260 }}>
-                        <div style={{ fontFamily: MONO, fontSize: 10, color: item.color, letterSpacing: "0.08em", marginBottom: 6 }}>{item.label}</div>
-                        <p style={{ fontFamily: SERIF, fontSize: 13.5, color: C.text, lineHeight: 1.65, margin: 0 }}>{item.text}</p>
-                      </div>
-                    ))}
-                  </div>
-                </Card>
-
-                {/* Charts */}
-                <SectionHead>Time Series Diagnostics</SectionHead>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                  <Card>
-                    <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 600, color: C.ink, marginBottom: 4 }}>Mean-field variables</div>
-                    <div style={{ fontFamily: MONO, fontSize: 11, color: C.textFaint, marginBottom: 12 }}>
-                      v̄, w̄, σ̄ averaged over grid. Theory: converge to fixed point or oscillate.
-                    </div>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <LineChart data={history}>
-                        <XAxis dataKey="t" tick={{ fontSize: 10 }} />
-                        <YAxis tick={{ fontSize: 10 }} domain={[0, 1]} />
-                        <Tooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="vm" name="v̄" stroke={C.green} dot={false} strokeWidth={2} />
-                        <Line type="monotone" dataKey="wm" name="w̄" stroke={C.blue} dot={false} strokeWidth={2} />
-                        <Line type="monotone" dataKey="sm" name="σ̄" stroke={C.amber} dot={false} strokeWidth={2} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </Card>
-
-                  <Card>
-                    <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 600, color: C.ink, marginBottom: 4 }}>Early warning signals</div>
-                    <div style={{ fontFamily: MONO, fontSize: 11, color: C.textFaint, marginBottom: 12 }}>
-                      Rise before tipping. Peak = critical slowing down at R_c.
-                    </div>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <LineChart data={history}>
-                        <XAxis dataKey="t" tick={{ fontSize: 10 }} />
-                        <YAxis tick={{ fontSize: 10 }} />
-                        <Tooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="vvar" name="Spatial var" stroke={C.red} dot={false} strokeWidth={2} />
-                        <Line type="monotone" dataKey="moran" name="Moran's I" stroke={C.purple} dot={false} strokeWidth={2} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </Card>
-
-                  <Card>
-                    <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 600, color: C.ink, marginBottom: 4 }}>Patch structure (percolation diagnostic)</div>
-                    <div style={{ fontFamily: MONO, fontSize: 11, color: C.textFaint, marginBottom: 12 }}>
-                      Mean cluster size peaks at R_c then collapses. Theory: ∝ |R−R_c|^(−43/18).
-                    </div>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <LineChart data={history}>
-                        <XAxis dataKey="t" tick={{ fontSize: 10 }} />
-                        <YAxis tick={{ fontSize: 10 }} />
-                        <Tooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="meanCluster" name="Mean cluster" stroke={C.green} dot={false} strokeWidth={2} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </Card>
-
-                  <Card>
-                    <div style={{ fontFamily: SERIF, fontSize: 14, fontWeight: 600, color: C.ink, marginBottom: 4 }}>Phase portrait — v̄ vs w̄</div>
-                    <div style={{ fontFamily: MONO, fontSize: 11, color: C.textFaint, marginBottom: 12 }}>
-                      Trajectory in mean-field space. Fixed point = stable state. Orbit = transient.
-                    </div>
-                    <ResponsiveContainer width="100%" height={200}>
-                      <ScatterChart>
-                        <XAxis dataKey="vm" name="v̄" tick={{ fontSize: 10 }} domain={[0, 1]} label={{ value: "v̄", position: "insideBottom", offset: -2 }} />
-                        <YAxis dataKey="wm" name="w̄" tick={{ fontSize: 10 }} domain={[0, 1]} label={{ value: "w̄", angle: -90, position: "insideLeft" }} />
-                        <Tooltip cursor={{ strokeDasharray: "3 3" }} />
-                        <Scatter data={history} fill={C.green} opacity={0.5} />
-                      </ScatterChart>
-                    </ResponsiveContainer>
-                  </Card>
-                </div>
-
-                {/* Summary table */}
-                <SectionHead>Summary Table — Theory vs. Simulation</SectionHead>
-                <Card style={{ padding: 0, overflow: "hidden" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead>
-                      <tr style={{ background: "#faf8f5" }}>
-                        {["Quantity", "Theory predicts", "Simulation value", "Status"].map(h => (
-                          <th key={h} style={{
-                            padding: "10px 12px", textAlign: "left", fontFamily: MONO,
-                            fontSize: 11, color: C.textFaint, letterSpacing: "0.06em",
-                            borderBottom: `2px solid ${C.border}`,
-                          }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <CompareRow
-                        quantity="Pattern formation (Moran's I > 0.1)"
-                        prediction="Yes, within 300 steps"
-                        observed={metrics?.moran > 0.1 ? `✓ I = ${metrics.moran.toFixed(3)}` : `I = ${metrics?.moran.toFixed(3)}`}
-                        status={metrics?.moran > 0.1 ? "match" : "partial"}
-                      />
-                      <CompareRow
-                        quantity="Soil memory σ̄ → σ*"
-                        prediction={`σ* = ${th.sigma_eq.toFixed(3)}`}
-                        observed={`σ̄ = ${metrics?.sm.toFixed(3)}`}
-                        status={metrics && Math.abs(metrics.sm - th.sigma_eq) < 0.05 ? "match" : "partial"}
-                      />
-                      <CompareRow
-                        quantity="Spatial variance rise near R_c"
-                        prediction={`Peak near R_c = ${th.Rc.toFixed(3)}`}
-                        observed={`Var = ${metrics?.vvar.toFixed(5)}`}
-                        status={metrics?.vvar > 0.03 ? "partial" : "tip"}
-                      />
-                      <CompareRow
-                        quantity="Large spanning cluster (>30% grid)"
-                        prediction="Yes for R > R_c"
-                        observed={`${metrics ? (metrics.maxCluster / (N * N) * 100).toFixed(1) : "—"}% of grid`}
-                        status={metrics ? (metrics.maxCluster > N * N * 0.3 ? "match" : metrics.maxCluster > N * N * 0.05 ? "partial" : "match") : "tip"}
-                      />
-                    </tbody>
-                  </table>
-                </Card>
-              </>
-            )}
+          {/* Ecology params */}
+          <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 10, color: C.textFaint, letterSpacing: "0.1em", marginBottom: 12 }}>
+              ECOLOGICAL PARAMETERS
+            </div>
+            <Slider label="rainfall  R" k="R" min={0.05} max={0.65} step={0.005} params={params} setParams={setParams} />
+            <Slider label="evaporation  E" k="E" min={0.10} max={0.90} step={0.01} params={params} setParams={setParams} />
+            <Slider label="plant uptake  α" k="alpha" min={0.5} max={7.0} step={0.1} params={params} setParams={setParams} />
+            <Slider label="saturation  β" k="beta" min={0.2} max={6.0} step={0.1} params={params} setParams={setParams} />
+            <Slider label="mortality  m" k="mort" min={0.02} max={0.55} step={0.005} params={params} setParams={setParams} />
+            <Slider label="seed dispersal  ε" k="eps" min={0.00} max={0.20} step={0.005} params={params} setParams={setParams} />
+            <Slider label="soil recovery  γ⁺" k="gp" min={0.01} max={0.20} step={0.005} params={params} setParams={setParams} />
+            <Slider label="soil degradation  γ⁻" k="gm" min={0.005} max={0.15} step={0.005} params={params} setParams={setParams} />
           </div>
-        )}
+
+          {/* Kernel radii */}
+          <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 10, color: C.textFaint, letterSpacing: "0.1em", marginBottom: 12 }}>
+              KERNEL RADII  <span style={{ color: C.textFaint, fontWeight: 400 }}>(controls pattern scale)</span>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 11, color: C.textMid }}>water diffusion radius  r_w</span>
+                <span style={{ fontSize: 11, color: C.blue, fontWeight: 700 }}>{params.wr}</span>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[2, 3, 4, 5, 6, 7].map(r => (
+                  <button key={r} onClick={() => setParams(p => ({ ...p, wr: r }))} style={{
+                    padding: "4px 12px", borderRadius: 4, cursor: "pointer",
+                    fontSize: 11, fontFamily: MONO,
+                    background: params.wr === r ? "#1a2a3a" : "transparent",
+                    color: params.wr === r ? C.blue : C.textFaint,
+                    border: `1px solid ${params.wr === r ? C.blue : C.border}`,
+                  }}>
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 11, color: C.textMid }}>seed dispersal radius  r_s</span>
+                <span style={{ fontSize: 11, color: C.green, fontWeight: 700 }}>{params.sr}</span>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {[1, 2, 3, 4].map(r => (
+                  <button key={r} onClick={() => setParams(p => ({ ...p, sr: r }))} style={{
+                    padding: "4px 12px", borderRadius: 4, cursor: "pointer",
+                    fontSize: 11, fontFamily: MONO,
+                    background: params.sr === r ? "#0f2d1a" : "transparent",
+                    color: params.sr === r ? C.greenBright : C.textFaint,
+                    border: `1px solid ${params.sr === r ? C.green : C.border}`,
+                  }}>
+                    {r}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{
+              marginTop: 12, padding: "8px 10px",
+              background: "#0d1a10", borderRadius: 5,
+              fontSize: 10, color: C.textFaint, lineHeight: 1.6,
+            }}>
+              λ* ≈ {(2 * Math.PI * params.wr / Math.sqrt((params.R * params.alpha) / (params.mort * params.E * (1 + params.beta * 0.25)))).toFixed(1)} cells
+              &nbsp;·&nbsp; ratio r_w/r_s = {(params.wr / params.sr).toFixed(1)} (must be &gt; 1 for Turing patterns)
+            </div>
+          </div>
+
+          {/* Theory quick-ref */}
+          <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, padding: 16 }}>
+            <div style={{ fontSize: 10, color: C.textFaint, letterSpacing: "0.1em", marginBottom: 10 }}>
+              LIVE THEORY
+            </div>
+            {[
+              ["σ* (soil eq.)", (params.gp / (params.gp + params.gm)).toFixed(3), C.amber],
+              ["R_c (collapse)", ((params.mort * params.E) / (params.alpha * params.gp / (params.gp + params.gm))).toFixed(3), C.red],
+              ["λ* (wavelength)", `${(2 * Math.PI * params.wr / Math.sqrt((params.R * params.alpha) / (params.mort * params.E * (1 + params.beta * 0.25)))).toFixed(1)} cells`, C.green],
+              ["Δ R_hyst ∝", (params.gm / params.gp).toFixed(2), C.blue],
+            ].map(([l, v, col]) => (
+              <div key={l} style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 11, color: C.textFaint }}>{l}</span>
+                <span style={{ fontSize: 11, color: col, fontWeight: 700 }}>{v}</span>
+              </div>
+            ))}
+          </div>
+
+        </div>
       </div>
     </div>
   );

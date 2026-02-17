@@ -1,266 +1,253 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from "recharts";
+import { useEffect, useRef, useState } from "react";
 
-/* -------------------------------------------------------------------------- */
-/*                                   THEME                                    */
-/* -------------------------------------------------------------------------- */
+export default function App() {
+  const canvasRef = useRef(null);
 
-const C = {
-  bg: "#0f1410",
-  panel: "#161d18",
-  border: "#263020",
-  green: "#4ade80",
-  greenDim: "#22543d",
-  greenBright: "#86efac",
-  amber: "#fbbf24",
-  blue: "#60a5fa",
-  red: "#f87171",
-  text: "#e2e8e0",
-  textMid: "#8fa88a",
-  textFaint: "#4a5e46",
-};
+  // =============================
+  // PARAMETERS
+  // =============================
 
-const MONO = "'JetBrains Mono', monospace";
+  const N = 160;                // grid size
+  const STEPS_PER_FRAME = 3;
+  const INIT_DENSITY = 0.15;
 
-/* -------------------------------------------------------------------------- */
-/*                                UTILITIES                                   */
-/* -------------------------------------------------------------------------- */
+  const [R, setR] = useState(0.25);   // rainfall
+  const E = 0.45;                     // evaporation
+  const alpha = 4.0;
+  const beta = 2.0;
+  const mort = 0.18;
+  const eps = 0.01;
 
-const clamp = (x) => Math.max(0, Math.min(1, x));
+  const waterDiff = 0.8;              // strong diffusion
+  const longComp = 0.6;               // long-range competition
 
-function buildOffsets(r) {
-  const o = [];
-  for (let dy = -r; dy <= r; dy++)
-    for (let dx = -r; dx <= r; dx++)
-      if (dx * dx + dy * dy <= r * r) o.push([dx, dy]);
-  return o;
-}
+  const WR = 6;  // water radius
+  const SR = 1;  // seed radius
 
-/* -------------------------------------------------------------------------- */
-/*                                 CA STEP                                    */
-/* -------------------------------------------------------------------------- */
+  // =============================
+  // STATE ARRAYS
+  // =============================
 
-function caStep(state, p, N, W_OFF, S_OFF) {
-  const { v, w, σ } = state;
-  const { R, E, alpha, beta, mort, eps, gp, gm } = p;
+  const v = useRef(new Float32Array(N * N));
+  const w = useRef(new Float32Array(N * N));
+  const s = useRef(new Float32Array(N * N));
 
   const nv = new Float32Array(N * N);
   const nw = new Float32Array(N * N);
-  const nσ = new Float32Array(N * N);
+  const ns = new Float32Array(N * N);
 
-  for (let y = 0; y < N; y++) {
-    for (let x = 0; x < N; x++) {
+  const [metrics, setMetrics] = useState({ mean: 0, var: 0 });
 
-      const i = y * N + x;
-      const vi = v[i];
-      const wi = w[i];
-      const si = σ[i];
+  // =============================
+  // NEIGHBOR OFFSETS
+  // =============================
 
-      /* -------------------- water diffusion -------------------- */
+  function buildOffsets(r) {
+    const arr = [];
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy <= r * r) {
+          arr.push([dx, dy]);
+        }
+      }
+    }
+    return arr;
+  }
 
-      let wsum = 0;
-      for (const [dx, dy] of W_OFF)
-        wsum += w[((y + dy + N) % N) * N + (x + dx + N) % N];
+  const W_OFF = buildOffsets(WR);
+  const S_OFF = buildOffsets(SR);
 
-      const wavg = wsum / W_OFF.length;
-      const wflow = wavg - wi;
+  // =============================
+  // INITIALIZATION
+  // =============================
 
-      /* ------------- long range vegetation competition ---------- */
-
-      let vLong = 0;
-      for (const [dx, dy] of W_OFF)
-        vLong += v[((y + dy + N) % N) * N + (x + dx + N) % N];
-
-      vLong /= W_OFF.length;
-
-      /* --------------------- seed dispersal ---------------------- */
-
-      let vseed = 0;
-      for (const [dx, dy] of S_OFF)
-        vseed += v[((y + dy + N) % N) * N + (x + dx + N) % N];
-
-      vseed /= S_OFF.length;
-
-      /* ------------------------ WATER ---------------------------- */
-      nw[i] = clamp(
-        wi
-        + R
-        - E * wi
-        - vi * wi * (1 + si)     // local uptake
-        - 0.7 * vLong * wi       // long range depletion (NEW)
-        + 0.8 * wflow            // strong diffusion
-      );
-
-      /* --------------------- VEGETATION -------------------------- */
-      nv[i] = clamp(
-        vi
-        + (alpha * wi * si / (1 + beta * wi)) * vi
-        - mort * vi
-        + eps * vseed * (1 - vi)
-      );
-
-      /* ----------------------- SOIL ------------------------------ */
-      nσ[i] = clamp(
-        si
-        + gp * vi * (1 - si)
-        - gm * (1 - vi) * si
-      );
+  function init() {
+    for (let i = 0; i < N * N; i++) {
+      v.current[i] = Math.random() < INIT_DENSITY ? Math.random() : 0;
+      w.current[i] = 0.5 + 0.1 * Math.random();
+      s.current[i] = 0.5 + 0.1 * Math.random();
     }
   }
 
-  return { v: nv, w: nw, σ: nσ };
-}
+  // =============================
+  // CLAMP
+  // =============================
 
-/* -------------------------------------------------------------------------- */
-/*                               INITIAL STATE                                */
-/* -------------------------------------------------------------------------- */
-
-function initState(N, seed = 1, density = 0.15) {
-  let s = seed | 0;
-  const rng = () => {
-    s = (s * 1664525 + 1013904223) & 0xffffffff;
-    return (s >>> 0) / 0xffffffff;
-  };
-
-  const v = new Float32Array(N * N);
-  const w = new Float32Array(N * N);
-  const σ = new Float32Array(N * N);
-
-  for (let i = 0; i < N * N; i++) {
-    v[i] = rng() < density ? 0.3 + rng() * 0.2 : 0;
-    w[i] = 0.3 + rng() * 0.2;
-    σ[i] = 0.3 + rng() * 0.2;
+  function clamp(x) {
+    if (x < 0) return 0;
+    if (x > 1) return 1;
+    return x;
   }
 
-  return { v, w, σ };
-}
+  // =============================
+  // UPDATE STEP
+  // =============================
 
-/* -------------------------------------------------------------------------- */
-/*                                  PRESETS                                   */
-/* -------------------------------------------------------------------------- */
+  function step() {
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const i = y * N + x;
 
-const PRESETS = {
-  "Spots":         { R: 0.22, E: 0.45, alpha: 4.0, beta: 2.0, mort: 0.18, eps: 0.01, gp: 0.06, gm: 0.04, wr: 6, sr: 1 },
-  "Labyrinths":    { R: 0.27, E: 0.45, alpha: 4.0, beta: 2.0, mort: 0.18, eps: 0.01, gp: 0.06, gm: 0.04, wr: 6, sr: 1 },
-  "Tiger Stripes": { R: 0.30, E: 0.40, alpha: 4.5, beta: 1.5, mort: 0.15, eps: 0.01, gp: 0.05, gm: 0.03, wr: 7, sr: 1 },
-  "Dense Cover":   { R: 0.40, E: 0.40, alpha: 4.5, beta: 1.5, mort: 0.12, eps: 0.01, gp: 0.05, gm: 0.03, wr: 6, sr: 1 },
-  "Near Collapse": { R: 0.16, E: 0.45, alpha: 4.0, beta: 2.0, mort: 0.18, eps: 0.01, gp: 0.06, gm: 0.04, wr: 6, sr: 1 },
-};
+        const vi = v.current[i];
+        const wi = w.current[i];
+        const si = s.current[i];
 
-/* -------------------------------------------------------------------------- */
-/*                                   APP                                      */
-/* -------------------------------------------------------------------------- */
+        // water diffusion
+        let wsum = 0;
+        for (const [dx, dy] of W_OFF) {
+          const nx = (x + dx + N) % N;
+          const ny = (y + dy + N) % N;
+          wsum += w.current[ny * N + nx];
+        }
+        const wavg = wsum / W_OFF.length;
+        const wflow = wavg - wi;
 
-export default function App() {
+        // long-range vegetation competition
+        let vLong = 0;
+        for (const [dx, dy] of W_OFF) {
+          const nx = (x + dx + N) % N;
+          const ny = (y + dy + N) % N;
+          vLong += v.current[ny * N + nx];
+        }
+        vLong /= W_OFF.length;
 
-  const [params, setParams] = useState(PRESETS["Spots"]);
-  const [gridN, setGridN] = useState(100);
-  const [running, setRunning] = useState(false);
+        // short-range seeding
+        let vseed = 0;
+        for (const [dx, dy] of S_OFF) {
+          const nx = (x + dx + N) % N;
+          const ny = (y + dy + N) % N;
+          vseed += v.current[ny * N + nx];
+        }
+        vseed /= S_OFF.length;
 
-  const stateRef = useRef(null);
-  const canvasRef = useRef(null);
-  const animRef = useRef(null);
+        // vegetation
+        const growth = (alpha * wi * si) / (1 + beta * wi);
+        nv[i] = clamp(
+          vi +
+          growth * vi -
+          mort * vi +
+          eps * vseed * (1 - vi)
+        );
 
-  const W_OFF = useRef(buildOffsets(params.wr));
-  const S_OFF = useRef(buildOffsets(params.sr));
+        // water
+        nw[i] = clamp(
+          wi +
+          R -
+          E * wi -
+          vi * wi * (1 + si) -
+          longComp * vLong * wi +
+          waterDiff * wflow
+        );
 
-  useEffect(() => {
-    W_OFF.current = buildOffsets(params.wr);
-    S_OFF.current = buildOffsets(params.sr);
-  }, [params.wr, params.sr]);
+        // soil
+        ns[i] = clamp(
+          si + 0.06 * vi - 0.04 * si
+        );
+      }
+    }
 
-  const reset = useCallback(() => {
-    stateRef.current = initState(gridN, Math.random() * 1e6 | 0);
-    render();
-  }, [gridN]);
+    v.current.set(nv);
+    w.current.set(nw);
+    s.current.set(ns);
+  }
 
-  useEffect(() => { reset(); }, [reset]);
+  // =============================
+  // METRICS
+  // =============================
 
-  function render() {
+  function computeMetrics() {
+    let sum = 0;
+    for (let i = 0; i < N * N; i++) sum += v.current[i];
+    const mean = sum / (N * N);
+
+    let varsum = 0;
+    for (let i = 0; i < N * N; i++) {
+      const d = v.current[i] - mean;
+      varsum += d * d;
+    }
+
+    setMetrics({ mean, var: varsum / (N * N) });
+  }
+
+  // =============================
+  // DRAW
+  // =============================
+
+  function draw() {
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-    const size = 600 / gridN;
-    const img = ctx.createImageData(600, 600);
+    const img = ctx.createImageData(N, N);
 
-    const { v } = stateRef.current;
-
-    for (let y = 0; y < gridN; y++) {
-      for (let x = 0; x < gridN; x++) {
-        const val = v[y * gridN + x];
-        const g = 40 + 200 * val;
-
-        for (let py = 0; py < size; py++)
-          for (let px = 0; px < size; px++) {
-            const pi = ((y * size + py) * 600 + x * size + px) * 4;
-            img.data[pi] = 20;
-            img.data[pi + 1] = g;
-            img.data[pi + 2] = 20;
-            img.data[pi + 3] = 255;
-          }
-      }
+    for (let i = 0; i < N * N; i++) {
+      const g = v.current[i] * 255;
+      img.data[i * 4 + 0] = 0;
+      img.data[i * 4 + 1] = g;
+      img.data[i * 4 + 2] = 0;
+      img.data[i * 4 + 3] = 255;
     }
 
     ctx.putImageData(img, 0, 0);
   }
 
-  function step() {
-    stateRef.current = caStep(
-      stateRef.current,
-      params,
-      gridN,
-      W_OFF.current,
-      S_OFF.current
-    );
-    render();
-  }
+  // =============================
+  // ANIMATION LOOP
+  // =============================
 
   useEffect(() => {
-    if (running) {
-      const loop = () => {
-        step();
-        animRef.current = requestAnimationFrame(loop);
-      };
-      animRef.current = requestAnimationFrame(loop);
+    init();
+
+    let frame;
+    function loop() {
+      for (let i = 0; i < STEPS_PER_FRAME; i++) step();
+      computeMetrics();
+      draw();
+      frame = requestAnimationFrame(loop);
     }
-    return () => cancelAnimationFrame(animRef.current);
-  }, [running, params]);
+
+    loop();
+    return () => cancelAnimationFrame(frame);
+  }, [R]);
+
+  // =============================
+  // UI
+  // =============================
 
   return (
-    <div style={{ background: "#0f1410", minHeight: "100vh", padding: 30, color: "#e2e8e0" }}>
-      <h2>Vegetation Pattern CA (Turing regime)</h2>
+    <div style={{ textAlign: "center", fontFamily: "sans-serif" }}>
+      <h2>Vegetation Pattern Formation (Turing CA)</h2>
 
       <canvas
         ref={canvasRef}
-        width={600}
-        height={600}
-        style={{ border: "1px solid #263020", imageRendering: "pixelated" }}
+        width={N}
+        height={N}
+        style={{ border: "1px solid black", imageRendering: "pixelated" }}
       />
 
-      <div style={{ marginTop: 15 }}>
-        <button onClick={() => setRunning(r => !r)}>
-          {running ? "Stop" : "Run"}
-        </button>
-
-        <button onClick={step} style={{ marginLeft: 10 }}>
-          Step
-        </button>
-
-        <button onClick={reset} style={{ marginLeft: 10 }}>
-          Reset
-        </button>
+      <div style={{ marginTop: 10 }}>
+        Rainfall:
+        <input
+          type="range"
+          min="0"
+          max="0.5"
+          step="0.01"
+          value={R}
+          onChange={(e) => setR(parseFloat(e.target.value))}
+          style={{ width: 300, marginLeft: 10 }}
+        />
+        {R.toFixed(2)}
       </div>
 
-      <div style={{ marginTop: 15 }}>
-        {Object.keys(PRESETS).map(name => (
-          <button
-            key={name}
-            onClick={() => { setParams(PRESETS[name]); reset(); }}
-            style={{ marginRight: 6 }}
-          >
-            {name}
-          </button>
-        ))}
+      <div style={{ marginTop: 10 }}>
+        Mean Vegetation: {metrics.mean.toFixed(3)} |
+        Variance: {metrics.var.toFixed(5)}
       </div>
+
+      <button
+        style={{ marginTop: 10 }}
+        onClick={() => init()}
+      >
+        Reset
+      </button>
     </div>
   );
 }

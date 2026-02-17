@@ -417,7 +417,7 @@ export default function App() {
                 <span style={{ fontSize:11, color:C.green, fontWeight:700 }}>{gridN} × {gridN}</span>
               </div>
               <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                {[40,60,80,100,120,500].map(n => (
+                {[40,60,80,100,120,200].map(n => (
                   <button key={n} onClick={() => setGridN(n)} style={{
                     padding:"4px 12px", borderRadius:4, cursor:"pointer", fontSize:11, fontFamily:MONO,
                     background:gridN===n?C.greenDim:"transparent", color:gridN===n?C.greenBright:C.textFaint,

@@ -467,7 +467,7 @@ export default function App() {
                           label={{ value:"e - ec", position:"insideBottom", offset:-8, fill:C.dim, fontSize:10 }} />
                         <YAxis stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
                           label={{ value:"xi (arb.)", angle:-90, position:"insideLeft", fill:C.dim, fontSize:10 }} />
-                        <Tooltip contentStyle={ttStyle} formatter={v => [v != null ? v.toFixed(3) : "—","xi"]}
+                        <Tooltip contentStyle={ttStyle} formatter={v => [v.toFixed(3),"xi"]}
                           labelFormatter={v => `e-ec = ${(+v).toFixed(4)}`} />
                         <ReferenceLine x={0} stroke={C.rose} strokeWidth={2} strokeDasharray="6 3"
                           label={{ value:"ec", fill:C.rose, fontSize:10 }} />
@@ -542,8 +542,6 @@ export default function App() {
               </div>
               {!isFrustrated ? (
                 <div style={{ color:C.rose, fontSize:11, padding:20 }}>Set frustrated parameters.</div>
-              ) : !growthCurves ? (
-                <div style={{ color:C.rose, fontSize:11, padding:20 }}>Computing growth curves…</div>
               ) : (
                 <ResponsiveContainer width="100%" height={340}>
                   <LineChart data={growthCurves.data} margin={{ top:10, right:24, bottom:40, left:20 }}>
@@ -557,7 +555,7 @@ export default function App() {
                       formatter={(v, n) => [v != null ? v.toFixed(5) : "—", n]}
                       labelFormatter={v => `k/pi = ${(+v).toFixed(4)}`} />
                     <ReferenceLine x={1} stroke={C.border2} strokeDasharray="3 3" />
-                    {(growthCurves?.entries ?? []).map(({ key, label, color }) => (
+                    {growthCurves.entries.map(({ key, label, color }) => (
                       <Line key={key} type="monotone" dataKey={key} stroke={color}
                         strokeWidth={key==="c3" ? 3 : 1.8} dot={false} name={`e = ${label}`} connectNulls />
                     ))}

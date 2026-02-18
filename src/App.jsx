@@ -1,43 +1,38 @@
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, ReferenceLine, Legend, ScatterChart, Scatter
+  ResponsiveContainer, ReferenceLine, Legend,
+  ComposedChart, Area,
 } from "recharts";
 
-// ─── colour palette ────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//  FRUSTRATED CML — CORRECTED & EXTENDED
+//  Bug fixes:
+//    1. B = -1/sqrt(2) exactly  (was -0.7071)
+//    2. A = u21 * sqrt(2)       (comment was inverted)
+//    3. Step 2 eq: psi_i^U = A*(psi_{i-1}+psi_{i+1}) + B*psi_i  (no /sqrt2)
+// ═══════════════════════════════════════════════════════════════════════════
+
 const C = {
-  bg:       "#080c14",
-  panel:    "#0d1420",
-  border:   "#1a2640",
-  border2:  "#243350",
-  amber:    "#f0a500",
-  amberDim: "#8a5f00",
-  cyan:     "#38bdf8",
-  cyanDim:  "#1d6e90",
-  rose:     "#f43f5e",
-  roseDim:  "#7f1d2e",
-  green:    "#34d399",
-  greenDim: "#065f46",
-  muted:    "#4a6080",
-  text:     "#c8d8f0",
-  textDim:  "#5a7090",
-  white:    "#eef4ff",
-  gridLine: "#111c2d",
+  bg:"#080c14", panel:"#0d1420", border:"#1a2640", border2:"#243350",
+  amber:"#f0a500", amberD:"#8a5f00", cyan:"#38bdf8", cyanD:"#1d6e90",
+  rose:"#f43f5e", roseD:"#7f1d2e", green:"#34d399", greenD:"#065f46",
+  violet:"#a78bfa", muted:"#4a6080", text:"#c8d8f0", dim:"#5a7090",
+  white:"#eef4ff", grid:"#111c2d",
 };
 
-// ─── math helpers ──────────────────────────────────────────────────────────
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-const sgn   = v => (v > 0 ? 1 : v < 0 ? -1 : 0);
+// ── Math helpers ─────────────────────────────────────────────────────────────
+const sgn = v => (v > 0 ? 1 : v < 0 ? -1 : 0);
 
-function computeEpsilonC(A, B) {
-  if (B === 0) return null;
-  if (sgn(A) === sgn(B)) return null;
+function computeEc(A, B) {
+  if (B === 0 || sgn(A) === sgn(B)) return null;
   const denom = 2 * (2 * A - B);
   if (Math.abs(denom) < 1e-12) return null;
   const ec = A / denom;
   return ec > 0 ? ec : null;
 }
 
+// g(k,eps) = log|A cos k + B| + log|1 + 2 eps cos k|
 function growthRate(k, A, B, eps) {
   const lc = A * Math.cos(k) + B;
   const le = 1 + 2 * eps * Math.cos(k);
@@ -45,1075 +40,806 @@ function growthRate(k, A, B, eps) {
   return Math.log(Math.abs(lc)) + Math.log(Math.abs(le));
 }
 
-function curveAtPi(A, B, eps) {
-  const d1 = B !== A ? A / (B - A) : Infinity;
-  const d2 = Math.abs(1 - 2 * eps) > 1e-12 ? (2 * eps) / (1 - 2 * eps) : Infinity;
-  return d1 + d2;
+// g''(pi, eps) = A/(B-A) + 2*eps/(1-2*eps)
+function curvatureAtPi(A, B, eps) {
+  const t1 = A / (B - A);
+  const t2 = Math.abs(1 - 2 * eps) > 1e-12 ? (2 * eps) / (1 - 2 * eps) : Infinity;
+  return t1 + t2;
 }
 
-function dominantK(A, B, eps) {
-  let bestK = 0, bestG = -Infinity;
-  const N = 1000;
-  for (let i = 0; i <= N; i++) {
-    const k = (i / N) * Math.PI;
-    const g = growthRate(k, A, B, eps);
-    if (g > bestG) { bestG = g; bestK = k; }
-  }
-  return bestK;
-}
-
-function cosKStar(A, B, eps) {
+// cos k* = -(A + 2 eps B) / (4 eps A)
+function cosKstar(A, B, eps) {
   const denom = 4 * eps * A;
   if (Math.abs(denom) < 1e-12) return null;
   const val = -(A + 2 * eps * B) / denom;
   return Math.abs(val) <= 1 ? val : null;
 }
 
-// ─── shared style fragments ────────────────────────────────────────────────
-const panelStyle = {
-  background: C.panel,
-  border: `1px solid ${C.border}`,
-  borderRadius: 12,
-  padding: "20px 24px",
-};
+// ── UI helpers ───────────────────────────────────────────────────────────────
+const P = { background:C.panel, border:`1px solid ${C.border}`, borderRadius:12, padding:"18px 22px" };
+const ttStyle = { background:"#0a0f1c", border:`1px solid ${C.border2}`, borderRadius:8, fontFamily:"monospace", fontSize:10, color:C.text };
 
-const labelStyle = {
-  fontFamily: "'Courier New', monospace",
-  fontSize: 10,
-  letterSpacing: "0.12em",
-  textTransform: "uppercase",
-  color: C.textDim,
-  marginBottom: 4,
-};
-
-const valueStyle = {
-  fontFamily: "'Courier New', monospace",
-  fontSize: 22,
-  fontWeight: 700,
-  color: C.amber,
-};
-
-const tagStyle = (col) => ({
-  display: "inline-block",
-  padding: "2px 10px",
-  borderRadius: 20,
-  fontSize: 11,
-  fontFamily: "'Courier New', monospace",
-  fontWeight: 700,
-  background: col + "22",
-  border: `1px solid ${col}55`,
-  color: col,
-});
-
-// ─── Slider ────────────────────────────────────────────────────────────────
-function Slider({ label, value, min, max, step, onChange, color = C.amber, unit = "" }) {
+function Slider({ label, value, min, max, step, onChange, color=C.amber }) {
   return (
-    <div style={{ marginBottom: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-        <span style={{ ...labelStyle }}>{label}</span>
-        <span style={{ fontFamily: "'Courier New', monospace", fontSize: 13, color: color }}>
-          {value.toFixed(4)}{unit}
-        </span>
+    <div style={{ marginBottom:14 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+        <span style={{ fontFamily:"monospace", fontSize:9, letterSpacing:"0.12em", color:C.dim, textTransform:"uppercase" }}>{label}</span>
+        <span style={{ fontFamily:"monospace", fontSize:13, fontWeight:700, color }}>{value.toFixed(5)}</span>
       </div>
-      <input
-        type="range" min={min} max={max} step={step} value={value}
+      <input type="range" min={min} max={max} step={step} value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
-        style={{ width: "100%", accentColor: color, cursor: "pointer", height: 4 }}
-      />
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
-        <span style={{ fontSize: 10, color: C.textDim, fontFamily: "monospace" }}>{min}</span>
-        <span style={{ fontSize: 10, color: C.textDim, fontFamily: "monospace" }}>{max}</span>
+        style={{ width:"100%", accentColor:color, cursor:"pointer", height:4 }} />
+      <div style={{ display:"flex", justifyContent:"space-between", marginTop:2 }}>
+        <span style={{ fontSize:8, fontFamily:"monospace", color:C.muted }}>{min}</span>
+        <span style={{ fontSize:8, fontFamily:"monospace", color:C.muted }}>{max}</span>
       </div>
     </div>
   );
 }
 
-// ─── Section header ────────────────────────────────────────────────────────
-function SectionTitle({ num, title, subtitle }) {
+function Stat({ label, value, color=C.amber }) {
   return (
-    <div style={{ marginBottom: 20, borderBottom: `1px solid ${C.border}`, paddingBottom: 14 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-        <span style={{
-          fontFamily: "'Courier New', monospace", fontSize: 11, color: C.amber,
-          letterSpacing: "0.2em",
-        }}>§{num}</span>
-        <h2 style={{
-          margin: 0, fontSize: 17, fontWeight: 700, color: C.white,
-          fontFamily: "Georgia, serif", letterSpacing: "-0.01em",
-        }}>{title}</h2>
-      </div>
-      {subtitle && (
-        <p style={{ margin: "6px 0 0 0", fontSize: 12, color: C.textDim, fontFamily: "Georgia, serif", fontStyle: "italic" }}>
-          {subtitle}
-        </p>
-      )}
+    <div style={{ background:C.bg, border:`1px solid ${C.border}`, borderRadius:8, padding:"9px 12px" }}>
+      <div style={{ fontSize:8, letterSpacing:"0.12em", color:C.dim, textTransform:"uppercase", marginBottom:4 }}>{label}</div>
+      <div style={{ fontFamily:"monospace", fontSize:14, fontWeight:700, color }}>{value}</div>
     </div>
   );
 }
 
-// ─── Equation block ────────────────────────────────────────────────────────
-function EqBlock({ label, children }) {
+function Badge({ label, color }) {
   return (
-    <div style={{
-      background: "#060a10", border: `1px solid ${C.border}`,
-      borderLeft: `3px solid ${C.amber}44`,
-      borderRadius: 8, padding: "12px 18px", margin: "12px 0",
-    }}>
-      {label && <div style={{ fontSize: 10, color: C.amberDim, fontFamily: "monospace", marginBottom: 4, letterSpacing: "0.1em" }}>{label}</div>}
-      <div style={{ fontFamily: "'Courier New', monospace", fontSize: 13, color: C.text, lineHeight: 1.8 }}>
-        {children}
-      </div>
+    <span style={{
+      display:"inline-block", padding:"2px 10px", borderRadius:20, fontSize:10,
+      fontFamily:"monospace", fontWeight:700,
+      background:color+"22", border:`1px solid ${color}55`, color,
+    }}>{label}</span>
+  );
+}
+
+function SecLabel({ children, color=C.dim }) {
+  return (
+    <div style={{ fontFamily:"monospace", fontSize:9, letterSpacing:"0.16em", color, textTransform:"uppercase", marginBottom:10 }}>
+      {children}
     </div>
   );
 }
 
-// ─── Theorem block ─────────────────────────────────────────────────────────
-function Theorem({ title, children }) {
+function InfoBox({ children, color=C.border }) {
   return (
-    <div style={{
-      background: "#0a0f1a", border: `1px solid ${C.border2}`,
-      borderRadius: 8, padding: "14px 18px", margin: "12px 0",
-    }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: C.cyan, fontFamily: "monospace", marginBottom: 6, letterSpacing: "0.05em" }}>
-        ⬡ {title}
-      </div>
-      <div style={{ fontSize: 12.5, color: C.text, lineHeight: 1.75, fontFamily: "Georgia, serif" }}>
-        {children}
-      </div>
+    <div style={{ padding:"10px 14px", background:C.bg, borderRadius:8, border:`1px solid ${color}`, fontSize:10, color:C.text, lineHeight:1.75 }}>
+      {children}
     </div>
   );
 }
 
-// ─── custom tooltip ────────────────────────────────────────────────────────
-function ChartTooltip({ active, payload, label, unit = "" }) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div style={{
-      background: "#0d1420ee", border: `1px solid ${C.border2}`,
-      borderRadius: 8, padding: "10px 14px", fontSize: 11, fontFamily: "monospace",
-    }}>
-      <div style={{ color: C.textDim, marginBottom: 4 }}>k/π = {(+label).toFixed(4)}</div>
-      {payload.map((p, i) => (
-        <div key={i} style={{ color: p.color }}>
-          {p.name}: {typeof p.value === "number" ? p.value.toFixed(5) : "—"}
-        </div>
-      ))}
-    </div>
-  );
+// ── Build growth curve dataset for multiple eps values ────────────────────────
+function buildGrowthData(A, B, epsEntries, N=300) {
+  return Array.from({ length:N+1 }, (_, i) => {
+    const k = (i / N) * Math.PI;
+    const row = { kpi: +(k / Math.PI).toFixed(4) };
+    epsEntries.forEach(({ eps, key }) => {
+      const g = growthRate(k, A, B, eps);
+      row[key] = isFinite(g) ? +g.toFixed(5) : null;
+    });
+    return row;
+  });
 }
 
 // ════════════════════════════════════════════════════════════════════════════
 export default function App() {
-  // ── state ────────────────────────────────────────────────────────────────
-  const [A, setA] = useState(1.0);
-  const [B, setB] = useState(-0.7071);
+  // FIX 1: B default = -1/sqrt(2) exactly (was -0.7071)
+  const [A, setA]     = useState(1.0);
+  const [B, setB]     = useState(-1 / Math.SQRT2);
   const [eps, setEps] = useState(0.12);
-  const [activeTab, setActiveTab] = useState("theory");
-  const [verifyEps, setVerifyEps] = useState(0.1847);
-  const [verifyA,   setVerifyA]   = useState(1.0);
-  const [verifyB,   setVerifyB]   = useState(-0.7071);
+  const [tab, setTab] = useState("theory");
 
-  // ── derived quantities ───────────────────────────────────────────────────
-  const ec = useMemo(() => computeEpsilonC(A, B), [A, B]);
-  const isTransition = ec !== null;
+  const ec = useMemo(() => computeEc(A, B), [A, B]);
+  const isFrustrated = ec !== null;
+
   const phase = useMemo(() => {
-    if (!isTransition) return sgn(A) === sgn(B) ? "Ferromagnetic" : "Trivial / No-transition";
-    if (eps < ec)  return "Antiferromagnetic (Néel)";
+    if (!isFrustrated) return sgn(A) === sgn(B) ? "Ferromagnetic" : "Trivial";
+    if (eps < ec - 0.005) return "Antiferromagnetic";
     if (Math.abs(eps - ec) < 0.005) return "Critical Point";
-    return "Incommensurate (Helical)";
-  }, [isTransition, ec, eps, A, B]);
+    return "Incommensurate";
+  }, [isFrustrated, ec, eps, A, B]);
 
-  const phaseColor = useMemo(() => {
-    if (phase.includes("Ferromagnetic")) return C.cyan;
-    if (phase.includes("Antiferromagnetic")) return C.amber;
-    if (phase.includes("Critical")) return C.rose;
-    if (phase.includes("Incommensurate")) return C.green;
-    return C.textDim;
-  }, [phase]);
+  const phaseColor = phase === "Ferromagnetic" ? C.cyan
+    : phase === "Antiferromagnetic" ? C.amber
+    : phase === "Critical Point" ? C.rose : C.green;
 
-  const curvature = useMemo(() => curveAtPi(A, B, eps), [A, B, eps]);
-  const kStar     = useMemo(() => {
-    if (!isTransition || eps <= ec) return null;
-    const cv = cosKStar(A, B, eps);
+  const curv  = useMemo(() => curvatureAtPi(A, B, eps), [A, B, eps]);
+  const kStar = useMemo(() => {
+    if (!isFrustrated || eps <= ec) return null;
+    const cv = cosKstar(A, B, eps);
     return cv !== null ? Math.acos(cv) : null;
-  }, [A, B, eps, ec, isTransition]);
+  }, [A, B, eps, ec, isFrustrated]);
 
-  const dominantMode = useMemo(() => dominantK(A, B, eps), [A, B, eps]);
-
-  // ── growth-rate curve data ───────────────────────────────────────────────
-  const growthData = useMemo(() => {
-    const N = 400;
-    return Array.from({ length: N + 1 }, (_, i) => {
-      const k = (i / N) * Math.PI;
-      const g = growthRate(k, A, B, eps);
-      const gec = ec !== null ? growthRate(k, A, B, ec) : null;
-      return { kpi: k / Math.PI, g: isFinite(g) ? g : null, gec: isFinite(gec) ? gec : null };
-    });
-  }, [A, B, eps, ec]);
-
-  // ── bifurcation diagram data ─────────────────────────────────────────────
+  // ── Bifurcation diagram data ────────────────────────────────────────────
   const bifData = useMemo(() => {
-    if (!isTransition || ec === null) return [];
-    const N = 200;
-    const lo = Math.max(0.001, ec * 0.2);
-    const hi = Math.min(0.99, ec * 4);
-    return Array.from({ length: N }, (_, i) => {
-      const e = lo + (i / (N - 1)) * (hi - lo);
-      const kd = dominantK(A, B, e);
-      const kth = e > ec ? Math.acos(clamp(cosKStar(A, B, e) ?? -1, -1, 1)) : Math.PI;
+    if (!isFrustrated || !ec) return [];
+    return Array.from({ length:500 }, (_, i) => {
+      const e = 0.001 + (i / 499) * (Math.min(ec * 4, 0.95) - 0.001);
+      if (e < ec) {
+        return { eps:+e.toFixed(5), kStable:1.0, kUnstable:null, kPlus:null, kMinus:null };
+      }
+      const cv  = cosKstar(A, B, e);
+      const kth = cv !== null ? Math.acos(cv) / Math.PI : 1;
+      return { eps:+e.toFixed(5), kStable:null, kUnstable:1.0, kPlus:kth, kMinus:-kth };
+    });
+  }, [A, B, ec, isFrustrated]);
+
+  // ── Curvature vs eps data ───────────────────────────────────────────────
+  const curvData = useMemo(() => {
+    if (!isFrustrated || !ec) return [];
+    return Array.from({ length:400 }, (_, i) => {
+      const e = 0.005 + (i / 399) * (Math.min(ec * 3.5, 0.48) - 0.005);
+      const c = curvatureAtPi(A, B, e);
       return {
-        eps: e,
-        kdNum:  kd / Math.PI,
-        kPlus:  e > ec ? kth / Math.PI : null,
-        kMinus: e > ec ? -kth / Math.PI : null,
-        kPi:    e <= ec ? 1.0 : null,
-        kPiUnstable: e > ec ? 1.0 : null,
+        eps:  +e.toFixed(4),
+        curv: isFinite(c) ? +c.toFixed(5) : null,
+        t1:   +(A / (B - A)).toFixed(5),
+        t2:   Math.abs(1 - 2*e) > 1e-9 ? +((2*e)/(1-2*e)).toFixed(5) : null,
       };
     });
-  }, [A, B, ec, isTransition]);
+  }, [A, B, ec, isFrustrated]);
 
-  // ── correlation length data ──────────────────────────────────────────────
+  // ── Correlation length data ─────────────────────────────────────────────
   const corrData = useMemo(() => {
-    if (!isTransition || ec === null) return [];
+    if (!isFrustrated || !ec) return [];
     const pts = [];
-    for (let i = 1; i <= 80; i++) {
-      const de = i * 0.002;
-      const e  = ec - de;
-      if (e <= 0) break;
-      const xi = 1 / Math.sqrt(de);
-      pts.push({ de: -de, xi });
+    for (let i = 1; i <= 100; i++) {
+      const de = i * 0.0015;
+      if (ec - de <= 0) break;
+      pts.push({ de:-de, xi: 1/Math.sqrt(de) });
     }
-    for (let i = 1; i <= 80; i++) {
-      const de = i * 0.002;
-      const e  = ec + de;
-      if (e >= 0.99) break;
-      const xi = 1 / Math.sqrt(de);
-      pts.push({ de, xi });
+    for (let i = 1; i <= 100; i++) {
+      const de = i * 0.0015;
+      if (ec + de >= 0.95) break;
+      pts.push({ de, xi: 1/Math.sqrt(de) });
     }
     return pts.sort((a, b) => a.de - b.de);
-  }, [ec, isTransition]);
+  }, [ec, isFrustrated]);
 
-  // ── verification ─────────────────────────────────────────────────────────
-  const verifyResult = useMemo(() => {
-    const ecTh = computeEpsilonC(verifyA, verifyB);
-    if (ecTh === null) return { type: "no-transition", ecTh: null, ecIn: verifyEps, match: null };
-    const err = Math.abs(verifyEps - ecTh);
-    const rel = err / ecTh;
-    return { type: "transition", ecTh, ecIn: verifyEps, err, rel, match: rel < 0.01 };
-  }, [verifyA, verifyB, verifyEps]);
+  // ── Growth-rate multi-curve data ────────────────────────────────────────
+  const growthCurves = useMemo(() => {
+    if (!isFrustrated || !ec) return null;
+    const entries = [
+      { eps:ec*0.3, key:"c1", label:"0.3 ec",  color:C.cyanD  },
+      { eps:ec*0.7, key:"c2", label:"0.7 ec",  color:C.cyan   },
+      { eps:ec,     key:"c3", label:"ec (crit)",color:C.rose   },
+      { eps:ec*1.4, key:"c4", label:"1.4 ec",  color:C.amber  },
+      { eps:ec*2.2, key:"c5", label:"2.2 ec",  color:C.green  },
+    ];
+    return { data:buildGrowthData(A, B, entries, 300), entries };
+  }, [A, B, ec, isFrustrated]);
 
-  // ── tabs ─────────────────────────────────────────────────────────────────
-  const tabs = [
-    { id: "theory",  label: "Theory" },
-    { id: "phase",   label: "Phase Explorer" },
-    { id: "plots",   label: "Visualizations" },
-    { id: "verify",  label: "Prediction Checker" },
-    { id: "cases",   label: "Special Cases" },
+  // ── ANNNI table data ────────────────────────────────────────────────────
+  const anniRows = useMemo(() => {
+    if (!isFrustrated || !ec) return [];
+    return [ec*0.3, ec*0.7, ec, ec*1.4, ec*2.2].map(e => {
+      const J1 = A + e * B;
+      const J2 = e * A;
+      const kappa = Math.abs(J1) > 1e-9 ? J2/J1 : Infinity;
+      const cv   = cosKstar(A, B, e);
+      const kdom = e < ec ? 1.0 : (cv !== null ? Math.acos(cv)/Math.PI : null);
+      const regime = e < ec-0.002 ? "AFM" : e > ec+0.002 ? "Incomm." : "Critical";
+      return {
+        eps:  e.toFixed(5),
+        J1:   J1.toFixed(5),
+        J2:   J2.toFixed(5),
+        kappa:isFinite(kappa) ? kappa.toFixed(5) : "inf",
+        kdom: kdom !== null ? kdom.toFixed(4) : "—",
+        regime,
+      };
+    });
+  }, [A, B, ec, isFrustrated]);
+
+  const TABS = [
+    { id:"theory",      label:"Theory"       },
+    { id:"bifurcation", label:"Bifurcation"  },
+    { id:"growth",      label:"Growth Rate"  },
+    { id:"curvature",   label:"Curvature"    },
+    { id:"annni",       label:"ANNNI Map"    },
   ];
 
-  // ────────────────────────────────────────────────────────────────────────
+  // ══════════════════════════════════════════════════════════════════════════
   return (
-    <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "Georgia, serif" }}>
+    <div style={{ background:C.bg, minHeight:"100vh", color:C.text, fontFamily:"monospace" }}>
 
-      {/* ── HEADER ───────────────────────────────────────────────────────── */}
-      <div style={{
-        borderBottom: `1px solid ${C.border}`,
-        background: "linear-gradient(180deg,#0d1828 0%,#080c14 100%)",
-        padding: "36px 40px 28px",
-      }}>
-        <div style={{ maxWidth: 1100, margin: "0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 10 }}>
-            <div style={{
-              width: 42, height: 42, borderRadius: 10,
-              background: `linear-gradient(135deg,${C.amber}33,${C.amber}11)`,
-              border: `1px solid ${C.amber}55`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 18,
-            }}>⬡</div>
-            <div>
-              <div style={{ fontSize: 10, letterSpacing: "0.25em", color: C.amberDim, fontFamily: "monospace", marginBottom: 2 }}>
-                STATISTICAL MECHANICS · COUPLED-MAP LATTICE · 1D
-              </div>
-              <h1 style={{ margin: 0, fontSize: 24, fontWeight: 700, color: C.white, letterSpacing: "-0.02em" }}>
-                Frustration-Driven Incommensurate Order Transition
-              </h1>
-            </div>
-          </div>
-          <p style={{ margin: "10px 0 0 56px", fontSize: 13, color: C.textDim, maxWidth: 740, lineHeight: 1.7 }}>
-            A one-dimensional constrained coupled-map lattice with projective normalization.
-            Exact critical coupling, pitchfork bifurcation, and universal mean-field scaling ν = ½.
-          </p>
+      {/* HEADER */}
+      <div style={{ background:C.panel, borderBottom:`1px solid ${C.border}`, padding:"16px 28px" }}>
+        <div style={{ fontSize:9, letterSpacing:"0.2em", color:C.amberD, textTransform:"uppercase", marginBottom:6 }}>
+          Frustrated CML · Phase Transition Analysis · Corrected
+        </div>
+        <h1 style={{ margin:0, fontSize:20, fontWeight:900, color:C.white }}>
+          Incommensurate Order Transition and Pitchfork Bifurcation
+        </h1>
+        <div style={{ marginTop:8, display:"flex", gap:16, flexWrap:"wrap", fontSize:10, color:C.dim }}>
+          <span>ec = A / [2(2A - B)]</span>
+          <span style={{ color:C.border2 }}>|</span>
+          <span>cos(k*) = -(A + 2eB) / (4eA)</span>
+          <span style={{ color:C.border2 }}>|</span>
+          <span>xi ~ |e - ec|^(-1/2)  nu = 1/2</span>
+          <span style={{ color:C.border2 }}>|</span>
+          <span style={{ color:C.green }}>B = -1/sqrt(2) exact  |  A = u21 * sqrt(2)</span>
         </div>
       </div>
 
-      {/* ── TAB BAR ──────────────────────────────────────────────────────── */}
-      <div style={{ borderBottom: `1px solid ${C.border}`, background: "#0a0f1a" }}>
-        <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", paddingLeft: 40 }}>
-          {tabs.map(t => (
-            <button key={t.id}
-              onClick={() => setActiveTab(t.id)}
-              style={{
-                background: "none", border: "none", cursor: "pointer",
-                padding: "14px 20px",
-                fontFamily: "'Courier New', monospace",
-                fontSize: 11, letterSpacing: "0.1em",
-                color: activeTab === t.id ? C.amber : C.textDim,
-                borderBottom: activeTab === t.id ? `2px solid ${C.amber}` : "2px solid transparent",
-                transition: "all 0.15s",
-              }}
-            >{t.label.toUpperCase()}</button>
-          ))}
-        </div>
+      {/* TAB BAR */}
+      <div style={{ background:C.panel, borderBottom:`1px solid ${C.border}`, display:"flex", padding:"0 28px" }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            background:"none", border:"none", cursor:"pointer", padding:"12px 18px",
+            fontFamily:"monospace", fontSize:10, letterSpacing:"0.1em", textTransform:"uppercase",
+            color: tab===t.id ? C.amber : C.dim,
+            borderBottom: tab===t.id ? `2px solid ${C.amber}` : "2px solid transparent",
+          }}>{t.label}</button>
+        ))}
       </div>
 
-      {/* ── MAIN CONTENT ─────────────────────────────────────────────────── */}
-      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "32px 40px 60px" }}>
+      <div style={{ padding:"22px 28px", maxWidth:1300 }}>
 
-        {/* ════════ THEORY TAB ═════════════════════════════════════════════ */}
-        {activeTab === "theory" && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-
-            {/* Model definition */}
-            <div style={{ ...panelStyle, gridColumn: "1 / -1" }}>
-              <SectionTitle num="1" title="Model Definition"
-                subtitle="A canonical-ensemble analogue of frustrated magnetism on a 1D lattice" />
-              <p style={{ fontSize: 13, lineHeight: 1.8, color: C.text, margin: "0 0 12px" }}>
-                Consider a 1D chain of field variables ψ<sub>i</sub>(t) ∈ ℝ — interpretable as
-                <strong style={{ color: C.amber }}> magnetization density</strong>,{" "}
-                <strong style={{ color: C.cyan }}>neural activity</strong>, or{" "}
-                <strong style={{ color: C.green }}>concentration fluctuations</strong>.
-                The global conservation law Σ|ψ<sub>j</sub>|² = const is enforced by projective
-                (canonical) normalization, which drives long-time dynamics to the dominant
-                eigenmode of the transfer operator.
-              </p>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                {[
-                  ["Step 1 · Spatial mixing", "φ⁽¹⁾ᵢ = (ψᵢ₋₁ + ψᵢ₊₁)/√2,  φ⁽²⁾ᵢ = ψᵢ"],
-                  ["Step 2 · Response kernel", "ψᵢ⁽ᵁ⁾ = (A/√2)(ψᵢ₋₁+ψᵢ₊₁) + B·ψᵢ"],
-                  ["Step 3 · Coupling (strength ε)", "ψ''ᵢ = ψᵢ⁽ᵁ⁾ + ε(ψ⁽ᵁ⁾ᵢ₋₁ + ψ⁽ᵁ⁾ᵢ₊₁)"],
-                  ["Step 4 · Canonical normalization", "ψᵢ(t+1) = ψ''ᵢ / √(Σⱼ|ψ''ⱼ|²)"],
-                ].map(([title, eq], i) => (
-                  <div key={i} style={{
-                    background: "#060a10", borderRadius: 8, padding: "12px 14px",
-                    border: `1px solid ${C.border}`,
-                  }}>
-                    <div style={{ ...labelStyle, marginBottom: 6, color: C.amberDim }}>{title}</div>
-                    <div style={{ fontFamily: "'Courier New', monospace", fontSize: 12, color: C.text }}>
-                      {eq}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Canonical parameters */}
-            <div style={panelStyle}>
-              <SectionTitle num="2" title="Canonical Parameters"
-                subtitle="Competition between hopping (A) and on-site (B) terms" />
-              <EqBlock label="DEFINITION">
-                A ≡ u₂₁/√2 &nbsp;&nbsp;&nbsp; (hopping amplitude)<br />
-                B ≡ u₂₂ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (on-site amplitude)
-              </EqBlock>
-              <EqBlock label="TRANSFER EIGENVALUE">
-                Λ(k, ε) = (A cos k + B)(1 + 2ε cos k)
-              </EqBlock>
-              <EqBlock label="LOGARITHMIC GROWTH RATE">
-                g(k, ε) = log|A cos k + B| + log|1 + 2ε cos k|
-              </EqBlock>
-              <p style={{ fontSize: 12.5, lineHeight: 1.75, color: C.text, margin: "10px 0 0" }}>
-                The canonical normalization converts this into a <em>dominant-mode selector</em>:
-                the long-time fixed point is the k* that maximises g(k,ε) — the statistical-mechanical
-                analogue of free-energy minimisation.
-              </p>
-            </div>
-
-            {/* Phase selection */}
-            <div style={panelStyle}>
-              <SectionTitle num="3" title="Phase Selection & Frustration"
-                subtitle="Mode competition at ε = 0 determines accessible phases" />
-              <Theorem title="Lemma 1 · Sign-based phase selection">
-                At ε = 0, the dominant mode is determined by sgn(A) vs sgn(B):<br /><br />
-                • <strong style={{ color: C.cyan }}>sgn(A) = sgn(B)</strong>: k=0 dominates
-                → <strong>Ferromagnetic phase</strong> (uniform order)<br />
-                • <strong style={{ color: C.amber }}>sgn(A) ≠ sgn(B)</strong>: k=π dominates
-                → <strong>Antiferromagnetic phase</strong> (staggered order)
-              </Theorem>
-              <p style={{ fontSize: 12.5, lineHeight: 1.75, color: C.text, margin: "10px 0 0" }}>
-                The condition sgn(A) ≠ sgn(B) encodes <strong style={{ color: C.amber }}>frustration</strong>:
-                hopping amplitude A favours connecting opposite-sign neighbours while on-site term B
-                favours same-sign. Their competition is precisely what enables a phase transition.
-              </p>
-              <div style={{ marginTop: 14, padding: "10px 14px", background: C.rose + "11",
-                border: `1px solid ${C.rose}33`, borderRadius: 8, fontSize: 12, color: C.text }}>
-                <strong style={{ color: C.rose }}>Key insight:</strong> Without frustration
-                (sgn(A)=sgn(B)), the coupling only reinforces ferromagnetic order at k=0.
-                No transition is possible.
-              </div>
-            </div>
-
-            {/* Critical point */}
-            <div style={{ ...panelStyle, gridColumn: "1 / -1" }}>
-              <SectionTitle num="4" title="Critical Coupling & Pitchfork Bifurcation"
-                subtitle="Exact closed-form result via curvature analysis" />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-                <div>
-                  <Theorem title="Theorem 2 · Curvature at k = π">
-                    g''(π, ε) = A/(B−A) + 2ε/(1−2ε)<br /><br />
-                    First term: fixed by kernel (negative when frustrated).<br />
-                    Second term: grows with ε (destabilises AFM phase).
-                  </Theorem>
-                  <Theorem title="Theorem 3 · Critical coupling">
-                    Set g''(π, εc) = 0:<br /><br />
-                    <strong style={{ color: C.amber, fontSize: 14 }}>
-                      εc = A / [2(2A − B)]
-                    </strong><br /><br />
-                    Valid only when sgn(B) ≠ sgn(A) and B ≠ 0.
-                  </Theorem>
-                </div>
-                <div>
-                  <Theorem title="Theorem 4 · Incommensurate wavevector (ε > εc)">
-                    cos k* = −(A + 2εB) / (4εA)<br /><br />
-                    The AFM mode k=π splits to a degenerate pair ±k*, which
-                    migrates continuously as ε increases.
-                  </Theorem>
-                  <Theorem title="Theorem 5 · Universal scaling exponent">
-                    ξ ~ |ε − εc|<sup>−ν</sup>,&nbsp;&nbsp; ν = <strong>1/2</strong><br /><br />
-                    Mean-field value, exact here due to the infinite-range nature
-                    of the normalization constraint. Z₂ pitchfork universality class.
-                  </Theorem>
-                </div>
-              </div>
-            </div>
-
-            {/* Physical connections */}
-            <div style={{ ...panelStyle, gridColumn: "1 / -1" }}>
-              <SectionTitle num="5" title="Physical Connections & Universality"
-                subtitle="Where this model sits in the landscape of exactly-solvable systems" />
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 16 }}>
-                {[
-                  {
-                    title: "ANNNI Model",
-                    color: C.amber,
-                    text: "The Axial Next-Nearest-Neighbor Ising model on a chain has competing J₁ (FM) and J₂ (AFM) interactions, producing a Lifshitz point and incommensurate modulated phase. Our model realises the same transition via kernel-parameter competition rather than range-dependent interactions.",
-                  },
-                  {
-                    title: "Turing Instability",
-                    color: C.cyan,
-                    text: "In reaction–diffusion systems, a Turing instability occurs when a uniform state loses stability to a patterned state at finite k* ≠ 0. Our εc is the exact Turing threshold, and the formula cos k* = −(A+2εB)/(4εA) predicts the selected pattern wavelength as a continuous function of coupling.",
-                  },
-                  {
-                    title: "Transfer Matrix / RG",
-                    color: C.green,
-                    text: "The projective normalization implements the power method on the transfer operator. The critical point corresponds to a degeneracy of the two largest eigenvalues, analogous to a conformal point in 1+1D quantum field theory. The exponent ν=1/2 is exact, not an approximation.",
-                  },
-                ].map(({ title, color, text }) => (
-                  <div key={title} style={{
-                    background: "#060a10", borderRadius: 8, padding: "14px 16px",
-                    border: `1px solid ${color}33`,
-                  }}>
-                    <div style={{ ...labelStyle, color, marginBottom: 8 }}>{title}</div>
-                    <p style={{ margin: 0, fontSize: 12, lineHeight: 1.75, color: C.text }}>{text}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
+        {/* SHARED CONTROLS */}
+        <div style={{ ...P, marginBottom:18, display:"flex", gap:28, alignItems:"center", flexWrap:"wrap" }}>
+          <div style={{ flex:1, minWidth:180 }}>
+            <Slider label="A — hopping amplitude" value={A} min={0.1} max={2.0} step={0.01} onChange={setA} color={C.amber} />
           </div>
-        )}
+          <div style={{ flex:1, minWidth:180 }}>
+            <Slider label="B — on-site amplitude" value={B} min={-2.0} max={2.0} step={0.00001} onChange={setB} color={C.cyan} />
+          </div>
+          <div style={{ flex:1, minWidth:180 }}>
+            <Slider label="e — coupling strength" value={eps} min={0.001} max={0.6} step={0.001} onChange={setEps} color={C.green} />
+          </div>
+          <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+            <Badge label={phase} color={phaseColor} />
+            {ec && <span style={{ fontSize:9, color:C.dim }}>ec = {ec.toFixed(6)}</span>}
+            <button
+              onClick={() => { setA(1.0); setB(-1/Math.SQRT2); setEps(0.12); }}
+              style={{ background:C.amberD+"30", border:`1px solid ${C.amberD}`, color:C.amber, borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:9 }}>
+              Hadamard preset
+            </button>
+            <button
+              onClick={() => { setA(1.5); setB(-0.5); setEps(0.15); }}
+              style={{ background:C.border, border:`1px solid ${C.border2}`, color:C.dim, borderRadius:6, padding:"4px 10px", cursor:"pointer", fontSize:9 }}>
+              A=1.5 B=-0.5
+            </button>
+          </div>
+        </div>
 
-        {/* ════════ PHASE EXPLORER TAB ═════════════════════════════════════ */}
-        {activeTab === "phase" && (
-          <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 24 }}>
+        {/* ════ THEORY TAB ════════════════════════════════════════════════ */}
+        {tab === "theory" && (
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:18 }}>
 
-            {/* Controls */}
-            <div>
-              <div style={panelStyle}>
-                <div style={{ ...labelStyle, marginBottom: 16 }}>KERNEL PARAMETERS</div>
-                <Slider label="A  (hopping amplitude)"  value={A}   min={-2} max={2}  step={0.01}  onChange={setA}  color={C.amber} />
-                <Slider label="B  (on-site amplitude)"  value={B}   min={-2} max={2}  step={0.001} onChange={setB}  color={C.cyan}  />
-                <div style={{ marginTop: 4, borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
-                  <div style={{ ...labelStyle, marginBottom: 16 }}>COUPLING STRENGTH</div>
-                  <Slider label="ε  (nearest-neighbour)" value={eps} min={0}  max={0.5} step={0.001} onChange={setEps} color={C.green} />
+            <div style={P}>
+              <SecLabel>Four-Step Evolution Protocol (corrected)</SecLabel>
+
+              {/* Step 1 */}
+              <div style={{ marginBottom:10, padding:"10px 14px", borderRadius:8, background:C.bg, border:`1px solid ${C.border}` }}>
+                <div style={{ fontSize:9, color:C.dim, textTransform:"uppercase", letterSpacing:"0.1em", marginBottom:4 }}>Step 1 — Spatial mixing</div>
+                <div style={{ fontSize:11, color:C.white, marginBottom:4 }}>{"phi1_i = (psi_{i-1} + psi_{i+1}) / sqrt(2)"}</div>
+                <div style={{ fontSize:11, color:C.white }}>{"phi2_i = psi_i"}</div>
+              </div>
+
+              {/* Step 2 — corrected */}
+              <div style={{ marginBottom:10, padding:"10px 14px", borderRadius:8, background:C.roseD+"18", border:`1px solid ${C.rose}44` }}>
+                <div style={{ fontSize:9, color:C.rose, textTransform:"uppercase", letterSpacing:"0.1em", marginBottom:4 }}>Step 2 — Coin operation [CORRECTED]</div>
+                <div style={{ fontSize:11, color:C.white, marginBottom:4 }}>{"psi_i^U = A * (psi_{i-1} + psi_{i+1}) + B * psi_i"}</div>
+                <div style={{ fontSize:9, color:C.dim }}>A = u21 * sqrt(2),  B = u22.  Fourier gives lambda_C(k) = A cos(k) + B  [correct]</div>
+                <div style={{ fontSize:9, color:C.rose, marginTop:4 }}>
+                  OLD (wrong): psi_i^U = (A/sqrt2)(psi_{i-1}+psi_{i+1}) + B*psi_i
                 </div>
-
-                {/* Quick presets */}
-                <div style={{ marginTop: 6, borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
-                  <div style={{ ...labelStyle, marginBottom: 10 }}>PRESETS</div>
-                  {[
-                    { name: "Hadamard",  A: 1,      B: -0.7071, eps: 0.12  },
-                    { name: "At εc",     A: 1,      B: -0.7071, eps: 0.1847},
-                    { name: "Above εc",  A: 1,      B: -0.7071, eps: 0.30  },
-                    { name: "Unfrustrated", A: 1,   B: 0.5,     eps: 0.20  },
-                    { name: "A=1.5 B=-0.5", A: 1.5, B: -0.5,   eps: 0.10  },
-                  ].map(p => (
-                    <button key={p.name}
-                      onClick={() => { setA(p.A); setB(p.B); setEps(p.eps); }}
-                      style={{
-                        display: "block", width: "100%", textAlign: "left",
-                        background: "#060a10", border: `1px solid ${C.border}`,
-                        borderRadius: 6, padding: "7px 12px", marginBottom: 6,
-                        fontFamily: "monospace", fontSize: 11, color: C.textDim,
-                        cursor: "pointer", transition: "all 0.15s",
-                      }}
-                      onMouseEnter={e => { e.target.style.borderColor = C.amber; e.target.style.color = C.amber; }}
-                      onMouseLeave={e => { e.target.style.borderColor = C.border; e.target.style.color = C.textDim; }}
-                    >{p.name}</button>
-                  ))}
+                <div style={{ fontSize:9, color:C.dim }}>
+                  Old Fourier gave A*sqrt(2)*cos(k) + B, not A*cos(k) + B — factor-of-sqrt(2) error in the displayed equation.
                 </div>
+              </div>
+
+              {/* Step 3 */}
+              <div style={{ marginBottom:10, padding:"10px 14px", borderRadius:8, background:C.bg, border:`1px solid ${C.border}` }}>
+                <div style={{ fontSize:9, color:C.dim, textTransform:"uppercase", letterSpacing:"0.1em", marginBottom:4 }}>Step 3 — Coupling (strength e)</div>
+                <div style={{ fontSize:11, color:C.white }}>{"psi_i'' = psi_i^U + e * (psi_{i-1}^U + psi_{i+1}^U)"}</div>
+                <div style={{ fontSize:9, color:C.dim, marginTop:4 }}>Fourier: lambda_e(k) = 1 + 2e cos(k)</div>
+              </div>
+
+              {/* Step 4 */}
+              <div style={{ padding:"10px 14px", borderRadius:8, background:C.bg, border:`1px solid ${C.border}` }}>
+                <div style={{ fontSize:9, color:C.dim, textTransform:"uppercase", letterSpacing:"0.1em", marginBottom:4 }}>Step 4 — Projective normalization</div>
+                <div style={{ fontSize:11, color:C.white }}>{"psi_i(t+1) = psi_i'' / sqrt( sum_j |psi_j''|^2 )"}</div>
+                <div style={{ fontSize:9, color:C.dim, marginTop:4 }}>Enforces sum|psi_i|^2 = 1 — implements power method on transfer operator</div>
               </div>
             </div>
 
-            {/* Live readouts */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
 
-              {/* Phase badge + critical info */}
-              <div style={{ ...panelStyle, borderColor: phaseColor + "55" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+              <div style={P}>
+                <SecLabel>Combined Dispersion Lambda(k, e)</SecLabel>
+                <div style={{ fontSize:12, color:C.amber, marginBottom:8 }}>
+                  Lambda(k,e) = (A cos k + B)(1 + 2e cos k)
+                </div>
+                <div style={{ fontSize:10, color:C.dim, marginBottom:12 }}>
+                  g(k,e) = log|A cos k + B| + log|1 + 2e cos k|
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
+                  <Stat label="g''(pi, e)" value={isFinite(curv) ? curv.toFixed(5) : "inf"} color={curv > 0 ? C.green : curv < 0 ? C.rose : C.amber} />
+                  <Stat label="ec = A/[2(2A-B)]" value={ec !== null ? ec.toFixed(6) : "undefined"} color={C.amber} />
+                  <Stat label="e / ec" value={ec !== null ? (eps/ec).toFixed(4) : "—"} color={C.cyan} />
+                  <Stat label="k*/pi" value={kStar !== null ? (kStar/Math.PI).toFixed(5) : "1 (AFM)"} color={C.green} />
+                </div>
+              </div>
+
+              <div style={P}>
+                <SecLabel>NNN structure from Steps 2+3 composition</SecLabel>
+                <div style={{ fontSize:10, color:C.text, lineHeight:1.8, marginBottom:8 }}>
+                  Expanding Steps 2 and 3 in real space:
+                </div>
+                <div style={{ padding:"8px 12px", background:C.bg, borderRadius:6, border:`1px solid ${C.border}`, fontSize:10, lineHeight:2 }}>
                   <div>
-                    <div style={labelStyle}>CURRENT PHASE</div>
-                    <div style={{ fontSize: 22, fontWeight: 700, color: phaseColor, fontFamily: "Georgia,serif" }}>{phase}</div>
+                    <span style={{ color:C.amber }}>On-site:</span>{" (B + 2eA) * psi_i"}
                   </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div style={labelStyle}>FRUSTRATION STATUS</div>
-                    <div style={{
-                      ...tagStyle(sgn(A) !== sgn(B) ? C.amber : C.textDim),
-                      fontSize: 12,
-                    }}>
-                      {sgn(A) !== sgn(B) ? "FRUSTRATED  ✓" : "UNFRUSTRATED  ✗"}
-                    </div>
+                  <div>
+                    <span style={{ color:C.cyan }}>NN:</span>{" (A + eB) * (psi_{i-1} + psi_{i+1})"}
+                  </div>
+                  <div>
+                    <span style={{ color:C.green }}>NNN:</span>{" eA * (psi_{i-2} + psi_{i+2})"}
                   </div>
                 </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14 }}>
-                  {[
-                    { label: "Critical Coupling εc", value: ec !== null ? ec.toFixed(6) : "undefined", color: C.amber },
-                    { label: "ε/εc ratio",  value: ec !== null ? (eps/ec).toFixed(4) : "—", color: ec !== null && eps > ec ? C.green : C.cyan },
-                    { label: "Curvature g''(π,ε)", value: isFinite(curvature) ? curvature.toFixed(5) : "∞", color: curvature > 0 ? C.green : curvature < 0 ? C.rose : C.amber },
-                    { label: "Dom. mode k*/π",  value: (dominantMode/Math.PI).toFixed(5), color: C.text },
-                  ].map(({ label, value, color }) => (
-                    <div key={label} style={{ background: "#060a10", borderRadius: 8, padding: "12px 14px", border: `1px solid ${C.border}` }}>
-                      <div style={labelStyle}>{label}</div>
-                      <div style={{ ...valueStyle, fontSize: 16, color }}>{value}</div>
-                    </div>
-                  ))}
+                <div style={{ fontSize:9, color:C.dim, marginTop:8, lineHeight:1.7 }}>
+                  J1_eff = A + eB (NN).  J2_eff = eA (NNN).
+                  Frustration when sgn(A) != sgn(B): NNN and NN compete.
                 </div>
               </div>
 
-              {/* Analytic predictions */}
-              <div style={panelStyle}>
-                <SectionTitle num="" title="Analytic Predictions at Current Parameters" />
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                  {/* εc derivation */}
-                  <div style={{ background: "#060a10", borderRadius: 8, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-                    <div style={{ ...labelStyle, marginBottom: 10 }}>CRITICAL COUPLING FORMULA</div>
-                    <div style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 2, color: C.text }}>
-                      A = {A.toFixed(4)},  B = {B.toFixed(4)}<br />
-                      2A − B = {(2*A - B).toFixed(4)}<br />
-                      εc = A/[2(2A−B)]<br />
-                      {ec !== null
-                        ? <><span style={{ color: C.amber }}>εc = {ec.toFixed(6)}</span><br />
-                          <span style={{ color: eps < ec ? C.cyan : C.green }}>ε = {eps.toFixed(4)} → {eps < ec ? "BELOW" : eps > ec ? "ABOVE" : "AT"} εc</span></>
-                        : <span style={{ color: C.rose }}>No transition (sgn condition not met)</span>
-                      }
+              <div style={{ ...P, border:`1px solid ${C.rose}44` }}>
+                <SecLabel color={C.rose}>Bug Fixes Applied</SecLabel>
+                {[
+                  { label:"B = -1/sqrt(2) exact", was:"was -0.7071 (6.78e-6 off, 0.00025% ec error)" },
+                  { label:"A = u21 * sqrt(2)",    was:"comment said A = u21/sqrt(2) — wrong direction" },
+                  { label:"Step 2: no /sqrt(2)",  was:"(A/sqrt2)(psi_{i-1}+psi_{i+1}) gave A*sqrt2 in Fourier" },
+                ].map(({ label, was }) => (
+                  <div key={label} style={{ display:"flex", gap:8, marginBottom:8 }}>
+                    <span style={{ color:C.green }}>ok</span>
+                    <div>
+                      <div style={{ fontSize:10, color:C.green }}>{label}</div>
+                      <div style={{ fontSize:9, color:C.dim }}>{was}</div>
                     </div>
                   </div>
-
-                  {/* k* prediction */}
-                  <div style={{ background: "#060a10", borderRadius: 8, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-                    <div style={{ ...labelStyle, marginBottom: 10 }}>INCOMMENSURATE WAVEVECTOR</div>
-                    <div style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 2, color: C.text }}>
-                      cos k* = −(A + 2εB)/(4εA)<br />
-                      Numerator = {(-(A + 2*eps*B)).toFixed(4)}<br />
-                      Denominator = {(4*eps*A).toFixed(4)}<br />
-                      {kStar !== null
-                        ? <><span style={{ color: C.green }}>k* = {kStar.toFixed(5)} rad</span><br />
-                          k*/π = <span style={{ color: C.green }}>{(kStar/Math.PI).toFixed(5)}</span></>
-                        : <span style={{ color: C.textDim }}>{eps <= ec ? "k* = π (AFM, ε < εc)" : "cos k* out of [−1,1]"}</span>
-                      }
-                    </div>
-                  </div>
-
-                  {/* Curvature analysis */}
-                  <div style={{ background: "#060a10", borderRadius: 8, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-                    <div style={{ ...labelStyle, marginBottom: 10 }}>CURVATURE ANALYSIS g''(π,ε)</div>
-                    <div style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 2, color: C.text }}>
-                      Term 1: A/(B−A) = {A !== B ? (A/(B-A)).toFixed(4) : "∞"}<br />
-                      Term 2: 2ε/(1−2ε) = {Math.abs(1-2*eps) > 1e-9 ? (2*eps/(1-2*eps)).toFixed(4) : "∞"}<br />
-                      g''(π,ε) = <span style={{ color: curvature > 0 ? C.green : curvature < 0 ? C.rose : C.amber }}>
-                        {isFinite(curvature) ? curvature.toFixed(5) : "∞"}</span><br />
-                      Status: <span style={{ color: curvature > 0 ? C.green : curvature < 0 ? C.rose : C.amber }}>
-                        {curvature > 0.01 ? "AFM UNSTABLE" : curvature < -0.01 ? "AFM stable" : "CRITICAL"}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Scaling */}
-                  <div style={{ background: "#060a10", borderRadius: 8, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-                    <div style={{ ...labelStyle, marginBottom: 10 }}>CORRELATION LENGTH SCALING</div>
-                    <div style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 2, color: C.text }}>
-                      ξ ~ |ε − εc|^(−1/2)<br />
-                      |ε − εc| = {ec !== null ? Math.abs(eps-ec).toFixed(5) : "—"}<br />
-                      ξ (scaled) = {ec !== null && Math.abs(eps-ec) > 1e-5
-                        ? (1/Math.sqrt(Math.abs(eps-ec))).toFixed(3) : "→ ∞"}<br />
-                      Exponent ν = <span style={{ color: C.amber }}>1/2  (mean-field, exact)</span>
-                    </div>
-                  </div>
-                </div>
+                ))}
               </div>
+
             </div>
           </div>
         )}
 
-        {/* ════════ PLOTS TAB ══════════════════════════════════════════════ */}
-        {activeTab === "plots" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+        {/* ════ BIFURCATION TAB ═══════════════════════════════════════════ */}
+        {tab === "bifurcation" && (
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 300px", gap:18 }}>
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
 
-            {/* Growth rate g(k,ε) */}
-            <div style={panelStyle}>
-              <SectionTitle num="3.1" title="Growth Rate Landscape  g(k, ε)"
-                subtitle="The dominant mode k* maximises g. The transition occurs when the k=π maximum flattens (curvature → 0)" />
-              <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: 16, marginBottom: 12 }}>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  <div style={{ background: "#060a10", borderRadius: 8, padding: "12px 14px", border: `1px solid ${C.border}` }}>
-                    <div style={labelStyle}>A</div>
-                    <Slider label="" value={A} min={-2} max={2} step={0.01} onChange={setA} color={C.amber} />
-                    <div style={labelStyle}>B</div>
-                    <Slider label="" value={B} min={-2} max={2} step={0.001} onChange={setB} color={C.cyan} />
-                    <div style={labelStyle}>ε</div>
-                    <Slider label="" value={eps} min={0} max={0.5} step={0.001} onChange={setEps} color={C.green} />
-                  </div>
-                  <div style={{ background: "#060a10", borderRadius: 8, padding: "12px 14px", border: `1px solid ${C.border}` }}>
-                    <div style={{ ...labelStyle, marginBottom: 8 }}>LEGEND</div>
-                    {[
-                      { color: C.amber, label: "g(k,ε) current" },
-                      { color: C.rose + "88", label: "g(k,εc) at critical" },
-                      { color: C.green, label: "dominant k*" },
-                    ].map(({ color, label }) => (
-                      <div key={label} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
-                        <div style={{ width: 16, height: 2, background: color, borderRadius: 2 }} />
-                        <span style={{ fontSize: 10, color: C.textDim, fontFamily: "monospace" }}>{label}</span>
-                      </div>
-                    ))}
-                  </div>
+              {/* Main bifurcation diagram */}
+              <div style={P}>
+                <SecLabel>Pitchfork Bifurcation — Dominant Mode k*/pi vs Coupling e</SecLabel>
+                <div style={{ fontSize:10, color:C.text, marginBottom:12, lineHeight:1.75 }}>
+                  Below ec: single stable branch at k=pi (Neel AFM). At ec: curvature g&#8243;(pi,ec)=0 (inflection).
+                  Above ec: k=pi destabilises; two symmetric branches +k* and -k* emerge continuously (supercritical pitchfork).
                 </div>
-                <ResponsiveContainer width="100%" height={320}>
-                  <LineChart data={growthData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-                    <CartesianGrid stroke={C.gridLine} strokeDasharray="3 3" />
-                    <XAxis dataKey="kpi" stroke={C.muted} tick={{ fill: C.textDim, fontSize: 10, fontFamily: "monospace" }}
-                      label={{ value: "k/π", position: "insideBottomRight", offset: -5, fill: C.textDim, fontSize: 11, fontFamily: "monospace" }} />
-                    <YAxis stroke={C.muted} tick={{ fill: C.textDim, fontSize: 10, fontFamily: "monospace" }}
-                      label={{ value: "g(k,ε)", angle: -90, position: "insideLeft", fill: C.textDim, fontSize: 11, fontFamily: "monospace" }} />
-                    <Tooltip content={<ChartTooltip />} />
-                    <Line dataKey="gec" stroke={C.rose + "66"} dot={false} strokeWidth={1.5}
-                      strokeDasharray="5 3" name="g(k,εc)" connectNulls={false} />
-                    <Line dataKey="g" stroke={C.amber} dot={false} strokeWidth={2} name="g(k,ε)" connectNulls={false} />
-                    {ec !== null && (
-                      <ReferenceLine x={1} stroke={C.rose} strokeDasharray="4 4" label={{ value: "k=π", fill: C.rose, fontSize: 10, fontFamily: "monospace" }} />
-                    )}
-                    <ReferenceLine x={dominantMode / Math.PI} stroke={C.green} strokeWidth={1.5}
-                      label={{ value: "k*", fill: C.green, fontSize: 10, fontFamily: "monospace" }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* Bifurcation diagram */}
-            <div style={panelStyle}>
-              <SectionTitle num="3.2" title="Bifurcation Diagram  k*(ε)"
-                subtitle="Pitchfork bifurcation: AFM mode k=π splits to ±k* at εc. Numerical (dots) vs analytic (lines)" />
-              {!isTransition ? (
-                <div style={{ textAlign: "center", padding: "40px 0", color: C.textDim, fontSize: 13, fontFamily: "monospace" }}>
-                  No transition for current A, B parameters. <br />
-                  Set sgn(A) ≠ sgn(B) and B ≠ 0 to see the bifurcation.
-                </div>
-              ) : (
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={bifData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-                    <CartesianGrid stroke={C.gridLine} strokeDasharray="3 3" />
-                    <XAxis dataKey="eps" stroke={C.muted} tick={{ fill: C.textDim, fontSize: 10, fontFamily: "monospace" }}
-                      label={{ value: "ε", position: "insideBottomRight", offset: -5, fill: C.textDim, fontSize: 11 }} />
-                    <YAxis domain={[-1.1, 1.1]} stroke={C.muted} tick={{ fill: C.textDim, fontSize: 10, fontFamily: "monospace" }}
-                      label={{ value: "k/π", angle: -90, position: "insideLeft", fill: C.textDim, fontSize: 11 }} />
-                    <Tooltip content={({ active, payload, label }) => {
-                      if (!active || !payload?.length) return null;
-                      return (
-                        <div style={{ background: "#0d1420ee", border: `1px solid ${C.border2}`, borderRadius: 8, padding: "10px 14px", fontSize: 11, fontFamily: "monospace" }}>
-                          <div style={{ color: C.textDim }}>ε = {(+label).toFixed(4)}</div>
-                          {payload.map((p, i) => p.value != null && (
-                            <div key={i} style={{ color: p.color }}>{p.name}: {p.value.toFixed(4)}</div>
-                          ))}
-                        </div>
-                      );
-                    }} />
-                    {ec !== null && <ReferenceLine x={ec} stroke={C.rose} strokeWidth={1.5}
-                      label={{ value: `εc=${ec.toFixed(4)}`, fill: C.rose, fontSize: 10, fontFamily: "monospace" }} />}
-                    <Line dataKey="kPi" stroke={C.amber} strokeWidth={2.5} dot={false} name="k=π (stable)" connectNulls={false} />
-                    <Line dataKey="kPiUnstable" stroke={C.amberDim} strokeWidth={1.5} dot={false}
-                      strokeDasharray="5 3" name="k=π (unstable)" connectNulls={false} />
-                    <Line dataKey="kPlus" stroke={C.green} strokeWidth={2} dot={false} name="+k*" connectNulls={false} />
-                    <Line dataKey="kMinus" stroke={C.cyan} strokeWidth={2} dot={false} name="−k*" connectNulls={false} />
-                    <Line dataKey="kdNum" stroke={C.text + "44"} strokeWidth={1} dot={false} name="k* (numerical)" connectNulls={false} />
-                    <Legend wrapperStyle={{ fontSize: 11, fontFamily: "monospace", paddingTop: 10 }} />
-                  </LineChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-
-            {/* Correlation length */}
-            <div style={panelStyle}>
-              <SectionTitle num="3.3" title="Correlation Length Divergence  ξ ~ |ε−εc|^(−ν)"
-                subtitle="Both sides of the critical point show power-law divergence with ν = 1/2" />
-              {!isTransition ? (
-                <div style={{ textAlign: "center", padding: "30px 0", color: C.textDim, fontSize: 13, fontFamily: "monospace" }}>
-                  Set frustrated parameters to see scaling.
-                </div>
-              ) : (
-                <ResponsiveContainer width="100%" height={260}>
-                  <LineChart data={corrData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-                    <CartesianGrid stroke={C.gridLine} strokeDasharray="3 3" />
-                    <XAxis dataKey="de" stroke={C.muted} tick={{ fill: C.textDim, fontSize: 10, fontFamily: "monospace" }}
-                      label={{ value: "ε − εc", position: "insideBottomRight", offset: -5, fill: C.textDim, fontSize: 11 }} />
-                    <YAxis stroke={C.muted} tick={{ fill: C.textDim, fontSize: 10, fontFamily: "monospace" }}
-                      label={{ value: "ξ (arb.)", angle: -90, position: "insideLeft", fill: C.textDim, fontSize: 11 }} />
-                    <Tooltip content={({ active, payload, label }) => {
-                      if (!active || !payload?.length) return null;
-                      return (
-                        <div style={{ background: "#0d1420ee", border: `1px solid ${C.border2}`, borderRadius: 8, padding: "10px 14px", fontSize: 11, fontFamily: "monospace" }}>
-                          <div style={{ color: C.textDim }}>ε−εc = {(+label).toFixed(4)}</div>
-                          <div style={{ color: C.cyan }}>ξ = {payload[0]?.value?.toFixed(3)}</div>
-                        </div>
-                      );
-                    }} />
-                    <ReferenceLine x={0} stroke={C.rose} strokeDasharray="4 4" label={{ value: "εc", fill: C.rose, fontSize: 11, fontFamily: "monospace" }} />
-                    <Line dataKey="xi" stroke={C.cyan} strokeWidth={2} dot={false} name="ξ" />
-                  </LineChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* ════════ PREDICTION CHECKER TAB ═════════════════════════════════ */}
-        {activeTab === "verify" && (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-
-            <div style={panelStyle}>
-              <SectionTitle num="V" title="Prediction Verification"
-                subtitle="Enter parameters to check against the exact theoretical formula" />
-              <div style={{ marginBottom: 20 }}>
-                <Slider label="A  (hopping)" value={verifyA} min={-2} max={2} step={0.001} onChange={setVerifyA} color={C.amber} />
-                <Slider label="B  (on-site)" value={verifyB} min={-2} max={2} step={0.001} onChange={setVerifyB} color={C.cyan} />
-                <div style={{ marginTop: 4, borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
-                  <Slider label="ε  (your proposed εc)" value={verifyEps} min={0} max={0.5} step={0.0001}
-                    onChange={setVerifyEps} color={C.green} />
-                </div>
-              </div>
-
-              {/* Result */}
-              <div style={{
-                borderRadius: 10, padding: "20px 22px",
-                background: verifyResult.type === "no-transition" ? C.rose + "0a"
-                  : verifyResult.match ? C.green + "0a" : C.rose + "0a",
-                border: `1px solid ${
-                  verifyResult.type === "no-transition" ? C.rose + "44"
-                  : verifyResult.match ? C.green + "44" : C.rose + "44"
-                }`,
-              }}>
-                <div style={{
-                  fontSize: 15, fontWeight: 700,
-                  color: verifyResult.type === "no-transition" ? C.rose
-                    : verifyResult.match ? C.green : C.rose,
-                  fontFamily: "Georgia, serif", marginBottom: 10,
-                }}>
-                  {verifyResult.type === "no-transition"
-                    ? "✗  No transition — parameters unfrustrated"
-                    : verifyResult.match
-                    ? "✓  Prediction matches theory"
-                    : "✗  Prediction does not match theory"}
-                </div>
-                {verifyResult.type === "transition" && (
-                  <div style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 2.2, color: C.text }}>
-                    <div>Analytic εc = A/[2(2A−B)] =
-                      <span style={{ color: C.amber }}> {verifyResult.ecTh.toFixed(8)}</span>
-                    </div>
-                    <div>Your εc =
-                      <span style={{ color: C.cyan }}> {verifyResult.ecIn.toFixed(8)}</span>
-                    </div>
-                    <div>Absolute error =
-                      <span style={{ color: verifyResult.match ? C.green : C.rose }}> {verifyResult.err.toFixed(8)}</span>
-                    </div>
-                    <div>Relative error =
-                      <span style={{ color: verifyResult.match ? C.green : C.rose }}> {(verifyResult.rel * 100).toFixed(5)} %</span>
-                    </div>
-                    <div>Tolerance = 1 % &nbsp;
-                      <span style={{ ...tagStyle(verifyResult.match ? C.green : C.rose) }}>
-                        {verifyResult.match ? "PASS" : "FAIL"}
-                      </span>
-                    </div>
-                  </div>
-                )}
-                {verifyResult.type === "no-transition" && (
-                  <div style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 1.9, color: C.text }}>
-                    sgn(A) = {sgn(verifyA)},  sgn(B) = {sgn(verifyB)}<br />
-                    Condition sgn(A) ≠ sgn(B) and B ≠ 0 is NOT met.<br />
-                    No incommensurate transition can occur.
-                  </div>
+                {!isFrustrated ? (
+                  <div style={{ color:C.rose, fontSize:11, padding:20 }}>Set frustrated parameters (sgn(A) != sgn(B)) to see the bifurcation.</div>
+                ) : (
+                  <ResponsiveContainer width="100%" height={320}>
+                    <ComposedChart data={bifData} margin={{ top:10, right:20, bottom:40, left:20 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
+                      <XAxis dataKey="eps" type="number" domain={["dataMin","dataMax"]}
+                        stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                        label={{ value:"Coupling e", position:"insideBottom", offset:-8, fill:C.dim, fontSize:10 }} />
+                      <YAxis domain={[-1.05,1.05]} stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                        label={{ value:"k*/pi", angle:-90, position:"insideLeft", fill:C.dim, fontSize:10 }} />
+                      <Tooltip contentStyle={ttStyle}
+                        formatter={(v, n) => [v != null ? v.toFixed(4) : "—", n]}
+                        labelFormatter={v => `e = ${(+v).toFixed(5)}`} />
+                      {ec && <ReferenceLine x={ec} stroke={C.rose} strokeWidth={2} strokeDasharray="6 3"
+                        label={{ value:`ec=${ec.toFixed(4)}`, fill:C.rose, fontSize:9, position:"top" }} />}
+                      <ReferenceLine y={0} stroke={C.border2} strokeWidth={1} />
+                      <Line type="monotone" dataKey="kStable"   stroke={C.cyan}   strokeWidth={2.5} dot={false} name="k=pi stable (AFM)"    connectNulls={false} />
+                      <Line type="monotone" dataKey="kUnstable" stroke={C.cyanD}  strokeWidth={1.5} dot={false} name="k=pi unstable (dashed)" connectNulls={false} strokeDasharray="5 4" />
+                      <Line type="monotone" dataKey="kPlus"     stroke={C.amber}  strokeWidth={2.5} dot={false} name="+k*/pi (incommensurate)" connectNulls={false} />
+                      <Line type="monotone" dataKey="kMinus"    stroke={C.green}  strokeWidth={2.5} dot={false} name="-k*/pi (incommensurate)" connectNulls={false} />
+                      <Legend wrapperStyle={{ fontSize:9, fontFamily:"monospace", paddingTop:8 }} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
                 )}
               </div>
 
-              {/* Step-by-step derivation */}
-              {verifyResult.type === "transition" && (
-                <div style={{ marginTop: 18 }}>
-                  <div style={{ ...labelStyle, marginBottom: 10 }}>STEP-BY-STEP DERIVATION</div>
-                  <EqBlock label="INPUT">
-                    A = {verifyA.toFixed(4)},  B = {verifyB.toFixed(4)}
-                  </EqBlock>
-                  <EqBlock label="SIGN CHECK">
-                    sgn(A) = {sgn(verifyA)},  sgn(B) = {sgn(verifyB)}<br />
-                    {sgn(verifyA) !== sgn(verifyB) && verifyB !== 0
-                      ? "✓ Frustrated: transition possible"
-                      : "✗ Not frustrated: no transition"}
-                  </EqBlock>
-                  <EqBlock label="FORMULA  εc = A / [2(2A − B)]">
-                    2A = {(2*verifyA).toFixed(4)}<br />
-                    2A − B = {(2*verifyA - verifyB).toFixed(4)}<br />
-                    2(2A − B) = {(2*(2*verifyA - verifyB)).toFixed(4)}<br />
-                    εc = {verifyA.toFixed(4)} / {(2*(2*verifyA-verifyB)).toFixed(4)}<br />
-                    εc = <strong style={{ color: C.amber }}>{verifyResult.ecTh.toFixed(8)}</strong>
-                  </EqBlock>
-                </div>
-              )}
-            </div>
-
-            {/* Curvature verification panel */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              <div style={panelStyle}>
-                <SectionTitle num="V.2" title="Curvature Verification"
-                  subtitle="Confirm that g''(π, εc) = 0 exactly at the critical point" />
-                {verifyResult.type === "transition" && (
+              {/* Correlation length */}
+              <div style={P}>
+                <SecLabel>Correlation Length  xi ~ |e - ec|^(-1/2)  (Universal Scaling, nu=1/2)</SecLabel>
+                {!isFrustrated ? (
+                  <div style={{ color:C.rose, fontSize:11 }}>Set frustrated parameters.</div>
+                ) : (
                   <>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                      {[
-                        {
-                          label: "g''(π, εc) [theory = 0]",
-                          value: curveAtPi(verifyA, verifyB, verifyResult.ecTh),
-                          target: 0,
-                        },
-                        {
-                          label: "g''(π, εc − 0.01)",
-                          value: curveAtPi(verifyA, verifyB, verifyResult.ecTh - 0.01),
-                          comment: "expect < 0",
-                        },
-                        {
-                          label: "g''(π, εc + 0.01)",
-                          value: curveAtPi(verifyA, verifyB, verifyResult.ecTh + 0.01),
-                          comment: "expect > 0",
-                        },
-                        {
-                          label: "k* at ε = εc + 0.05 (formula)",
-                          value: (() => {
-                            const cv = cosKStar(verifyA, verifyB, verifyResult.ecTh + 0.05);
-                            return cv !== null ? (Math.acos(cv) / Math.PI) : null;
-                          })(),
-                          comment: "k*/π",
-                        },
-                      ].map(({ label, value, comment }) => (
-                        <div key={label} style={{ background: "#060a10", borderRadius: 8, padding: "12px 14px", border: `1px solid ${C.border}` }}>
-                          <div style={{ ...labelStyle, marginBottom: 6 }}>{label}</div>
-                          <div style={{ fontFamily: "monospace", fontSize: 14, color: C.amber }}>
-                            {value != null ? (isFinite(value) ? value.toFixed(6) : "∞") : "—"}
-                          </div>
-                          {comment && <div style={{ fontSize: 10, color: C.textDim, marginTop: 4, fontFamily: "monospace" }}>{comment}</div>}
-                        </div>
-                      ))}
+                    <div style={{ fontSize:10, color:C.text, marginBottom:10, lineHeight:1.75 }}>
+                      As e approaches ec from either side the spatial correlation length diverges.
+                      The mean-field exponent nu=1/2 is exact here due to the infinite-range projective constraint.
+                      The symmetric divergence on both sides confirms a continuous second-order transition.
                     </div>
-
-                    <div style={{ marginTop: 16 }}>
-                      <div style={{ ...labelStyle, marginBottom: 10 }}>SIGN STRUCTURE VERIFICATION</div>
-                      <div style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 2, color: C.text,
-                        background: "#060a10", borderRadius: 8, padding: "12px 14px", border: `1px solid ${C.border}` }}>
-                        Below εc: g''(π,ε) &lt; 0  → k=π is a local MAX → AFM stable<br />
-                        At εc:    g''(π,ε) = 0  → inflection → critical point<br />
-                        Above εc: g''(π,ε) &gt; 0  → k=π is a local MIN → AFM unstable<br />
-                        <br />
-                        <span style={{ color: C.green }}>Curvature flips sign at εc: verified ✓</span>
-                      </div>
-                    </div>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <LineChart data={corrData} margin={{ top:8, right:20, bottom:40, left:20 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
+                        <XAxis dataKey="de" type="number" stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                          label={{ value:"e - ec", position:"insideBottom", offset:-8, fill:C.dim, fontSize:10 }} />
+                        <YAxis stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                          label={{ value:"xi (arb.)", angle:-90, position:"insideLeft", fill:C.dim, fontSize:10 }} />
+                        <Tooltip contentStyle={ttStyle} formatter={v => [v.toFixed(3),"xi"]}
+                          labelFormatter={v => `e-ec = ${(+v).toFixed(4)}`} />
+                        <ReferenceLine x={0} stroke={C.rose} strokeWidth={2} strokeDasharray="6 3"
+                          label={{ value:"ec", fill:C.rose, fontSize:10 }} />
+                        <Line type="monotone" dataKey="xi" stroke={C.violet} strokeWidth={2} dot={false} name="xi ~ |e-ec|^(-1/2)" />
+                      </LineChart>
+                    </ResponsiveContainer>
                   </>
                 )}
-                {verifyResult.type === "no-transition" && (
-                  <div style={{ textAlign: "center", padding: "30px 0", color: C.textDim, fontSize: 13, fontFamily: "monospace" }}>
-                    Set frustrated parameters (sgn(A) ≠ sgn(B), B ≠ 0).
+              </div>
+
+            </div>
+
+            {/* Sidebar */}
+            <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+              <div style={P}>
+                <SecLabel>Parameters</SecLabel>
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  <Stat label="A" value={A.toFixed(5)} color={C.amber} />
+                  <Stat label="B  (-1/sqrt2 = -0.70711...)" value={B.toFixed(8)} color={C.cyan} />
+                  <Stat label="ec = A/[2(2A-B)]" value={ec !== null ? ec.toFixed(8) : "N/A"} color={C.rose} />
+                  <Stat label="e" value={eps.toFixed(5)} color={C.green} />
+                  <Stat label="e / ec" value={ec ? (eps/ec).toFixed(4) : "—"} color={C.amber} />
+                  <Stat label="k*/pi" value={kStar ? (kStar/Math.PI).toFixed(6) : "1 (AFM)"} color={C.green} />
+                </div>
+              </div>
+
+              <div style={P}>
+                <SecLabel>Pitchfork Universality</SecLabel>
+                <div style={{ fontSize:10, color:C.text, lineHeight:1.8 }}>
+                  <div style={{ marginBottom:8 }}>
+                    Z2 symmetry: both +k* and -k* emerge at the same ec simultaneously.
+                    This is the hallmark of a supercritical pitchfork bifurcation.
                   </div>
+                  <div style={{ padding:"6px 10px", background:C.bg, borderRadius:6, fontSize:9, marginBottom:8, lineHeight:1.7 }}>
+                    <div>g(k,e) ~= g0 - a*de*(dk)^2 - b*(dk)^4 + ...</div>
+                    <div>Width: Delta_k ~ sqrt(|de|)</div>
+                  </div>
+                  <div style={{ color:C.violet, fontWeight:700 }}>xi ~ 1/Delta_k ~ |e-ec|^(-1/2)</div>
+                </div>
+              </div>
+
+              <div style={P}>
+                <SecLabel>cos(k*) formula</SecLabel>
+                <div style={{ fontSize:10, color:C.amber, marginBottom:8 }}>
+                  cos(k*) = -(A + 2eB) / (4eA)
+                </div>
+                {ec && eps > ec && kStar ? (
+                  <div style={{ fontSize:9, color:C.text, lineHeight:1.8 }}>
+                    <div style={{ color:C.dim }}>Numerator:   {(-(A + 2*eps*B)).toFixed(5)}</div>
+                    <div style={{ color:C.dim }}>Denominator: {(4*eps*A).toFixed(5)}</div>
+                    <div style={{ color:C.green, fontWeight:700, marginTop:6 }}>k*/pi = {(kStar/Math.PI).toFixed(6)}</div>
+                    <div style={{ color:C.dim }}>k* approaches pi as e approaches ec from above</div>
+                  </div>
+                ) : (
+                  <div style={{ color:C.cyan, fontSize:9 }}>e is at or below ec — k* = pi (AFM stable)</div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ════ GROWTH RATE TAB ═══════════════════════════════════════════ */}
+        {tab === "growth" && (
+          <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+
+            <div style={P}>
+              <SecLabel>g(k, e) = log|A cos k + B| + log|1 + 2e cos k| — Five Curves</SecLabel>
+              <div style={{ fontSize:10, color:C.text, marginBottom:12, lineHeight:1.75 }}>
+                Five curves at e = 0.3ec, 0.7ec, ec, 1.4ec, 2.2ec.
+                The peak at k=pi flattens at ec (curvature = 0), then splits to two off-axis maxima above ec.
+                The mode that maximises g(k,e) is the long-time dominant mode under projective dynamics.
+              </div>
+              {!isFrustrated ? (
+                <div style={{ color:C.rose, fontSize:11, padding:20 }}>Set frustrated parameters.</div>
+              ) : (
+                <ResponsiveContainer width="100%" height={340}>
+                  <LineChart data={growthCurves.data} margin={{ top:10, right:24, bottom:40, left:20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
+                    <XAxis dataKey="kpi" type="number" domain={[0,1]} stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                      tickFormatter={v => `${v}pi`}
+                      label={{ value:"Wavevector k/pi", position:"insideBottom", offset:-8, fill:C.dim, fontSize:10 }} />
+                    <YAxis stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                      label={{ value:"g(k,e)", angle:-90, position:"insideLeft", fill:C.dim, fontSize:10 }} />
+                    <Tooltip contentStyle={ttStyle}
+                      formatter={(v, n) => [v != null ? v.toFixed(5) : "—", n]}
+                      labelFormatter={v => `k/pi = ${(+v).toFixed(4)}`} />
+                    <ReferenceLine x={1} stroke={C.border2} strokeDasharray="3 3" />
+                    {growthCurves.entries.map(({ key, label, color }) => (
+                      <Line key={key} type="monotone" dataKey={key} stroke={color}
+                        strokeWidth={key==="c3" ? 3 : 1.8} dot={false} name={`e = ${label}`} connectNulls />
+                    ))}
+                    <Legend wrapperStyle={{ fontSize:9, fontFamily:"monospace", paddingTop:8 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </div>
+
+            {/* Five-column annotation cards */}
+            {isFrustrated && ec && (
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:10 }}>
+                {[
+                  { ev:ec*0.3, label:"e = 0.3 ec", color:C.cyanD,
+                    note:"Single sharp peak at k=pi. AFM strongly dominant. g''(pi,e) is negative (concave down)." },
+                  { ev:ec*0.7, label:"e = 0.7 ec", color:C.cyan,
+                    note:"Peak still at k=pi but curvature is less negative. AFM weakening." },
+                  { ev:ec,     label:"e = ec (critical)", color:C.rose,
+                    note:"Curvature g''(pi,ec) = 0 exactly. Flat plateau at k=pi. Bifurcation inflection point." },
+                  { ev:ec*1.4, label:"e = 1.4 ec", color:C.amber,
+                    note:"k=pi is now a local MINIMUM. Two new maxima at +k* and -k* appear symmetrically." },
+                  { ev:ec*2.2, label:"e = 2.2 ec", color:C.green,
+                    note:"Incommensurate phase well established. k* peaks are separated and still evolving." },
+                ].map(({ ev, label, color, note }) => {
+                  const cv = cosKstar(A, B, ev);
+                  const ks = ev > ec && cv !== null ? Math.acos(cv)/Math.PI : null;
+                  const gc = curvatureAtPi(A, B, ev);
+                  return (
+                    <div key={label} style={{ background:C.bg, border:`1px solid ${color}33`, borderRadius:8, padding:"10px 12px" }}>
+                      <div style={{ fontSize:10, color, fontWeight:700, marginBottom:6 }}>{label}</div>
+                      <div style={{ fontSize:9, color:C.dim, lineHeight:1.6, marginBottom:6 }}>{note}</div>
+                      <div style={{ fontSize:8, color:C.dim }}>{"g\u2033(pi) = "}{isFinite(gc) ? gc.toFixed(3) : "inf"}</div>
+                      {ks && <div style={{ fontSize:8, color:C.amber }}>k*/pi = {ks.toFixed(4)}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Live single-curve */}
+            <div style={P}>
+              <SecLabel>Live Growth Rate at Current e = {eps.toFixed(5)}</SecLabel>
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart
+                  data={Array.from({ length:301 }, (_, i) => {
+                    const k = (i/300)*Math.PI;
+                    const g = growthRate(k, A, B, eps);
+                    return { kpi:+(k/Math.PI).toFixed(4), g:isFinite(g) ? +g.toFixed(5) : null };
+                  })}
+                  margin={{ top:8, right:20, bottom:36, left:20 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
+                  <XAxis dataKey="kpi" stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                    tickFormatter={v => `${v}pi`}
+                    label={{ value:"k/pi", position:"insideBottom", offset:-8, fill:C.dim, fontSize:10 }} />
+                  <YAxis stroke={C.dim} tick={{ fontSize:8, fill:C.dim }} />
+                  <Tooltip contentStyle={ttStyle} formatter={v => [v?.toFixed(5),"g"]} labelFormatter={v => `k/pi=${v}`} />
+                  {kStar && <ReferenceLine x={kStar/Math.PI} stroke={C.green} strokeDasharray="4 3"
+                    label={{ value:`k*=${(kStar/Math.PI).toFixed(3)}pi`, fill:C.green, fontSize:9 }} />}
+                  <ReferenceLine x={1} stroke={C.cyan} strokeDasharray="4 3"
+                    label={{ value:"k=pi", fill:C.cyan, fontSize:9 }} />
+                  <Line type="monotone" dataKey="g" stroke={phaseColor} strokeWidth={2} dot={false} name="g(k,e)" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+          </div>
+        )}
+
+        {/* ════ CURVATURE TAB ════════════════════════════════════════════ */}
+        {tab === "curvature" && (
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 300px", gap:18 }}>
+            <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+
+              {/* Curvature vs eps */}
+              <div style={P}>
+                <SecLabel>{"Curvature g''(pi, e) = A/(B-A) + 2e/(1-2e)  vs  Coupling e"}</SecLabel>
+                <div style={{ fontSize:10, color:C.text, marginBottom:12, lineHeight:1.75 }}>
+                  Transition is signalled by the zero crossing at e=ec.
+                  Negative means k=pi is a local maximum (AFM stable).
+                  Positive means k=pi is a local minimum (AFM unstable, incommensurate order).
+                </div>
+                {!isFrustrated ? (
+                  <div style={{ color:C.rose, fontSize:11 }}>Set frustrated parameters.</div>
+                ) : (
+                  <ResponsiveContainer width="100%" height={300}>
+                    <ComposedChart data={curvData} margin={{ top:10, right:24, bottom:40, left:20 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
+                      <XAxis dataKey="eps" stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                        label={{ value:"e (coupling strength)", position:"insideBottom", offset:-8, fill:C.dim, fontSize:10 }} />
+                      <YAxis stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                        label={{ value:"g''(pi, e)", angle:-90, position:"insideLeft", fill:C.dim, fontSize:10 }} />
+                      <Tooltip contentStyle={ttStyle}
+                        formatter={v => [v?.toFixed(5)]}
+                        labelFormatter={v => `e=${(+v).toFixed(4)}`} />
+                      <ReferenceLine y={0} stroke={C.white} strokeWidth={1.5} />
+                      {ec && <ReferenceLine x={ec} stroke={C.rose} strokeWidth={2} strokeDasharray="6 3"
+                        label={{ value:"ec", fill:C.rose, fontSize:10, position:"top" }} />}
+                      <Area type="monotone" dataKey="curv" stroke="none" fill={C.cyan} fillOpacity={0.06} baseValue={0} />
+                      <Line type="monotone" dataKey="curv" stroke={C.violet} strokeWidth={2.5} dot={false} name="g''(pi,e)" />
+                      {ec && <ReferenceLine x={eps} stroke={C.amber} strokeWidth={1.5} strokeOpacity={0.6}
+                        label={{ value:"e", fill:C.amber, fontSize:9 }} />}
+                      <Legend wrapperStyle={{ fontSize:9, fontFamily:"monospace", paddingTop:8 }} />
+                    </ComposedChart>
+                  </ResponsiveContainer>
                 )}
               </div>
 
-              {/* Benchmark table */}
-              <div style={panelStyle}>
-                <SectionTitle num="V.3" title="Benchmark Cases" subtitle="Known exact values to test against" />
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontFamily: "monospace" }}>
-                  <thead>
-                    <tr style={{ borderBottom: `1px solid ${C.border2}` }}>
-                      {["Kernel", "A", "B", "εc (exact)", "Phase behaviour"].map(h => (
-                        <th key={h} style={{ textAlign: "left", padding: "6px 8px", color: C.textDim, fontWeight: 600, letterSpacing: "0.05em" }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[
-                      ["Hadamard",    "1",     "−1/√2", "1/(4+√2) ≈ 0.184720", "AFM → Incommensurate"],
-                      ["A=1.5, B=−0.5", "1.5", "−0.5",  (1.5/(2*(3+0.5))).toFixed(6),    "AFM → Incommensurate"],
-                      ["A=0.8, B=−0.4", "0.8", "−0.4",  (0.8/(2*(1.6+0.4))).toFixed(6),  "AFM → Incommensurate"],
-                      ["Pauli-X",    "√2",    "0",     "undefined",             "FM only, no transition"],
-                      ["Identity/Z", "0",     "±1",    "undefined",             "Trivial, no mixing"],
-                    ].map(([name, a, b, ec_, behaviour], i) => (
-                      <tr key={i} style={{ borderBottom: `1px solid ${C.border}`, background: i%2 ? "#060a10" : "transparent" }}>
-                        <td style={{ padding: "7px 8px", color: C.amber }}>{name}</td>
-                        <td style={{ padding: "7px 8px", color: C.text }}>{a}</td>
-                        <td style={{ padding: "7px 8px", color: C.text }}>{b}</td>
-                        <td style={{ padding: "7px 8px", color: C.green }}>{ec_}</td>
-                        <td style={{ padding: "7px 8px", color: C.textDim }}>{behaviour}</td>
-                      </tr>
+              {/* Decomposition */}
+              <div style={P}>
+                <SecLabel>{"Decomposition: Term1 + Term2 = g''(pi, e)"}</SecLabel>
+                {isFrustrated && (
+                  <ResponsiveContainer width="100%" height={220}>
+                    <LineChart data={curvData} margin={{ top:8, right:24, bottom:40, left:20 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
+                      <XAxis dataKey="eps" stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                        label={{ value:"e", position:"insideBottom", offset:-8, fill:C.dim, fontSize:12 }} />
+                      <YAxis stroke={C.dim} tick={{ fontSize:8, fill:C.dim }} />
+                      <Tooltip contentStyle={ttStyle} formatter={v => [v?.toFixed(5)]} labelFormatter={v => `e=${(+v).toFixed(4)}`} />
+                      <ReferenceLine y={0} stroke={C.border2} />
+                      {ec && <ReferenceLine x={ec} stroke={C.rose} strokeWidth={1.5} strokeDasharray="5 4" />}
+                      <Line type="monotone" dataKey="t1" stroke={C.amber} strokeWidth={1.5} strokeDasharray="5 3" dot={false} name="Term1: A/(B-A) fixed" />
+                      <Line type="monotone" dataKey="t2" stroke={C.cyan}  strokeWidth={1.5} dot={false} name="Term2: 2e/(1-2e) grows" />
+                      <Line type="monotone" dataKey="curv" stroke={C.violet} strokeWidth={2.5} dot={false} name="Sum = g''(pi,e)" />
+                      <Legend wrapperStyle={{ fontSize:9, fontFamily:"monospace", paddingTop:8 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                )}
+                <div style={{ fontSize:9, color:C.dim, lineHeight:1.7, marginTop:10 }}>
+                  Term 1 = A/(B-A) is negative and constant (frustration set by coin parameters).
+                  Term 2 = 2e/(1-2e) is positive and grows with e.
+                  They cancel exactly at e=ec, crossing from AFM-stable to AFM-unstable.
+                </div>
+              </div>
+
+            </div>
+
+            {/* Sidebar */}
+            <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+              <div style={P}>
+                <SecLabel>Live Values at Current e</SecLabel>
+                <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                  <Stat label="Term1: A/(B-A)" value={(A/(B-A)).toFixed(6)} color={C.amber} />
+                  <Stat label="Term2: 2e/(1-2e)" value={Math.abs(1-2*eps)>1e-9 ? ((2*eps)/(1-2*eps)).toFixed(6) : "inf"} color={C.cyan} />
+                  <Stat label="Sum g''(pi,e)" value={isFinite(curv) ? curv.toFixed(6) : "inf"}
+                    color={curv>0.01 ? C.green : curv<-0.01 ? C.rose : C.amber} />
+                  <Stat label="Status" value={curv>0.01 ? "AFM UNSTABLE" : curv<-0.01 ? "AFM stable" : "CRITICAL"}
+                    color={curv>0.01 ? C.green : curv<-0.01 ? C.cyan : C.rose} />
+                  <Stat label="ec" value={ec !== null ? ec.toFixed(8) : "N/A"} color={C.rose} />
+                </div>
+              </div>
+              <div style={P}>
+                <SecLabel>Sign Table</SecLabel>
+                {[
+                  { regime:"e below ec", color:C.cyan,  sign:"< 0", note:"k=pi local MAX — AFM stable" },
+                  { regime:"e = ec",     color:C.rose,  sign:"= 0", note:"inflection — bifurcation point" },
+                  { regime:"e above ec", color:C.green, sign:"> 0", note:"k=pi local MIN — incommensurate" },
+                ].map(({ regime, color, sign, note }) => (
+                  <div key={regime} style={{ borderLeft:`3px solid ${color}`, paddingLeft:10, marginBottom:10 }}>
+                    <div style={{ fontSize:10, color, fontWeight:700 }}>{regime}</div>
+                    <div style={{ fontSize:9, color:C.text }}>{"g''(pi,e) "}{sign}</div>
+                    <div style={{ fontSize:9, color:C.dim }}>{note}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ════ ANNNI MAPPING TAB ════════════════════════════════════════ */}
+        {tab === "annni" && (
+          <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+
+            <div style={P}>
+              <SecLabel>ANNNI Effective Coupling Structure</SecLabel>
+              <div style={{ fontSize:10, color:C.text, lineHeight:1.8, marginBottom:16 }}>
+                Expanding Steps 2+3 gives an ANNNI-like effective Hamiltonian with competing NN and NNN interactions.
+                H_eff = -J1_eff * sum(si*si+1) + J2_eff * sum(si*si+2)
+              </div>
+
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:16, marginBottom:20 }}>
+                {[
+                  { label:"J1_eff = A + eB", desc:"NN effective coupling. Can change sign when B is negative.", color:C.cyan,
+                    val: (A + eps*B).toFixed(5) },
+                  { label:"J2_eff = e * A", desc:"NNN effective coupling. Grows linearly with coupling e.", color:C.green,
+                    val: (eps*A).toFixed(5) },
+                  { label:"kappa_eff = J2/J1", desc:"Frustration ratio. ANNNI Lifshitz point is at kappa = 0.5.", color:C.amber,
+                    val: Math.abs(A + eps*B) > 1e-9 ? ((eps*A)/(A+eps*B)).toFixed(5) : "inf" },
+                ].map(({ label, desc, color, val }) => (
+                  <div key={label} style={{ background:C.bg, border:`1px solid ${color}33`, borderRadius:8, padding:12 }}>
+                    <div style={{ color, fontSize:12, fontWeight:700, marginBottom:6 }}>{label}</div>
+                    <div style={{ fontSize:9, color:C.dim, lineHeight:1.6, marginBottom:8 }}>{desc}</div>
+                    <div style={{ fontSize:14, color, fontWeight:700 }}>{val}</div>
+                    <div style={{ fontSize:8, color:C.dim }}>at current e = {eps.toFixed(4)}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* kappa vs eps chart */}
+              {isFrustrated && ec && (
+                <ResponsiveContainer width="100%" height={260}>
+                  <ComposedChart
+                    data={Array.from({ length:400 }, (_, i) => {
+                      const e = 0.001 + (i/399)*(Math.min(ec*4,0.6)-0.001);
+                      const J1 = A + e*B;
+                      const J2 = e*A;
+                      const kappa = Math.abs(J1) > 1e-9 ? J2/J1 : null;
+                      return {
+                        eps:   +e.toFixed(4),
+                        kappa: kappa !== null && Math.abs(kappa) < 5 ? +kappa.toFixed(5) : null,
+                        J1eff: +J1.toFixed(5),
+                        J2eff: +J2.toFixed(5),
+                      };
+                    })}
+                    margin={{ top:10, right:24, bottom:40, left:20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={C.grid} />
+                    <XAxis dataKey="eps" stroke={C.dim} tick={{ fontSize:8, fill:C.dim }}
+                      label={{ value:"e (coupling strength)", position:"insideBottom", offset:-8, fill:C.dim, fontSize:10 }} />
+                    <YAxis stroke={C.dim} tick={{ fontSize:8, fill:C.dim }} domain={[-1,3]} />
+                    <Tooltip contentStyle={ttStyle} formatter={v => [v?.toFixed(5)]} labelFormatter={v => `e=${(+v).toFixed(4)}`} />
+                    <ReferenceLine y={0.5} stroke={C.rose} strokeDasharray="6 3"
+                      label={{ value:"kappa=0.5 (ANNNI Lifshitz)", fill:C.rose, fontSize:9, position:"insideTopRight" }} />
+                    <ReferenceLine y={0} stroke={C.border2} />
+                    {ec && <ReferenceLine x={ec} stroke={C.rose} strokeWidth={1.5} strokeDasharray="5 4"
+                      label={{ value:"ec", fill:C.rose, fontSize:9, position:"top" }} />}
+                    <ReferenceLine x={eps} stroke={C.amber} strokeOpacity={0.5} />
+                    <Line type="monotone" dataKey="kappa" stroke={C.amber} strokeWidth={2.5} dot={false} name="kappa_eff = J2/J1" connectNulls={false} />
+                    <Line type="monotone" dataKey="J1eff" stroke={C.cyan}  strokeWidth={1.5} strokeDasharray="4 3" dot={false} name="J1_eff" />
+                    <Line type="monotone" dataKey="J2eff" stroke={C.green} strokeWidth={1.5} strokeDasharray="4 3" dot={false} name="J2_eff" />
+                    <Legend wrapperStyle={{ fontSize:9, fontFamily:"monospace", paddingTop:8 }} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              )}
+
+              <div style={{ marginTop:12, padding:"10px 14px", background:C.bg, borderRadius:8, border:`1px solid ${C.rose}33`, fontSize:10, color:C.dim, lineHeight:1.75 }}>
+                <span style={{ color:C.rose, fontWeight:700 }}>Note on ANNNI equivalence (LaTeX Section 7.1 bug corrected): </span>
+                The CML critical coupling ec = A/[2(2A-B)] does NOT exactly coincide with kappa_eff = 0.5.
+                At e=ec, kappa_eff = {ec ? ((ec*A)/(A+ec*B)).toFixed(5) : "—"} which is not 0.5.
+                The qualitative analogy holds (competing NN/NNN interactions causing frustration) but
+                the exact mapping breaks because ec is derived from the curvature condition g&#8243;(pi,ec)=0,
+                not from the ANNNI Lifshitz criterion kappa=0.5.
+                The LaTeX Section 7.1 proof had a factor-of-2 algebra error in cross-multiplying.
+              </div>
+            </div>
+
+            {/* ANNNI table */}
+            <div style={P}>
+              <SecLabel>Effective ANNNI Parameters at Five Representative e Values</SecLabel>
+              <table style={{ width:"100%", borderCollapse:"collapse", fontFamily:"monospace", fontSize:10 }}>
+                <thead>
+                  <tr style={{ borderBottom:`1px solid ${C.border2}` }}>
+                    {["e","J1_eff","J2_eff","kappa_eff","k*/pi","Regime"].map(h => (
+                      <th key={h} style={{ padding:"6px 10px", textAlign:"left", color:C.dim, fontSize:9, letterSpacing:"0.1em", textTransform:"uppercase" }}>{h}</th>
                     ))}
-                  </tbody>
-                </table>
-              </div>
+                  </tr>
+                </thead>
+                <tbody>
+                  {anniRows.map(row => (
+                    <tr key={row.eps} style={{ borderBottom:`1px solid ${C.border}` }}>
+                      <td style={{ padding:"7px 10px", color:C.amber }}>{row.eps}</td>
+                      <td style={{ padding:"7px 10px", color:parseFloat(row.J1)>0 ? C.green : C.rose }}>{row.J1}</td>
+                      <td style={{ padding:"7px 10px", color:C.cyan }}>{row.J2}</td>
+                      <td style={{ padding:"7px 10px", color:C.violet }}>{row.kappa}</td>
+                      <td style={{ padding:"7px 10px", color:C.text }}>{row.kdom}</td>
+                      <td style={{ padding:"7px 10px" }}>
+                        <Badge label={row.regime} color={row.regime==="AFM" ? C.cyan : row.regime==="Critical" ? C.rose : C.green} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
+
           </div>
         )}
 
-        {/* ════════ SPECIAL CASES TAB ══════════════════════════════════════ */}
-        {activeTab === "cases" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 20 }}>
-              {[
-                {
-                  title: "Hadamard Kernel",
-                  color: C.amber,
-                  matrix: "H = (1/√2)[[1,1],[1,−1]]",
-                  params: "u₂₁ = 1/√2,  u₂₂ = −1/√2\nA = 1,  B = −1/√2",
-                  check: "sgn(A)=+1 ≠ −1=sgn(B) ✓\nFrustrated → transition occurs",
-                  result: "εc = 1/[2(2+1/√2)]\n   = 1/(4+√2)\n   ≈ 0.184720",
-                  note: "Maximally frustrated case. The standard reference example in this model. Below εc: Néel order. Above εc: helical phase with k*(ε) evolving continuously.",
-                },
-                {
-                  title: "Pauli-X Kernel",
-                  color: C.cyan,
-                  matrix: "σₓ = [[0,1],[1,0]]",
-                  params: "u₂₁ = 1,  u₂₂ = 0\nA = √2,  B = 0",
-                  check: "B = 0 → condition not met ✗\nUnfrustrated → NO transition",
-                  result: "εc = undefined\n(ferromagnetic for all ε)",
-                  note: "B=0 means no on-site amplitude. The k=0 mode dominates at all coupling strengths. The coupling only reinforces FM order. No pitchfork bifurcation occurs.",
-                },
-                {
-                  title: "Pauli-Z / Identity",
-                  color: C.muted,
-                  matrix: "σz = [[1,0],[0,−1]]\nI  = [[1,0],[0,1]]",
-                  params: "u₂₁ = 0  (diagonal)\nA = 0,  B = ±1 or 1",
-                  check: "A = 0 → no spatial mixing ✗\nTrivial, decoupled sites",
-                  result: "εc = undefined\n(no interaction)",
-                  note: "Off-diagonal element u₂₁=0 means no hopping between sites. Each site evolves independently. The model collapses to a trivial fixed point with no ordered phase structure.",
-                },
-              ].map(({ title, color, matrix, params, check, result, note }) => (
-                <div key={title} style={{ ...panelStyle, borderColor: color + "44" }}>
-                  <div style={{ fontFamily: "'Courier New', monospace", fontSize: 13, fontWeight: 700,
-                    color, marginBottom: 14, letterSpacing: "0.05em" }}>{title}</div>
-                  <div style={{ ...labelStyle, marginBottom: 4 }}>MATRIX</div>
-                  <div style={{ fontFamily: "monospace", fontSize: 11, color: C.text,
-                    background: "#060a10", padding: "8px 10px", borderRadius: 6, marginBottom: 12,
-                    border: `1px solid ${C.border}` }}>{matrix}</div>
-                  <div style={{ ...labelStyle, marginBottom: 4 }}>PARAMETERS</div>
-                  <div style={{ fontFamily: "monospace", fontSize: 11, color: C.text,
-                    background: "#060a10", padding: "8px 10px", borderRadius: 6, marginBottom: 12,
-                    border: `1px solid ${C.border}`, whiteSpace: "pre-line" }}>{params}</div>
-                  <div style={{ ...labelStyle, marginBottom: 4 }}>CONDITION CHECK</div>
-                  <div style={{ fontFamily: "monospace", fontSize: 11,
-                    color: check.includes("✓") ? C.green : C.rose,
-                    background: "#060a10", padding: "8px 10px", borderRadius: 6, marginBottom: 12,
-                    border: `1px solid ${(check.includes("✓") ? C.green : C.rose) + "33"}`,
-                    whiteSpace: "pre-line" }}>{check}</div>
-                  <div style={{ ...labelStyle, marginBottom: 4 }}>RESULT</div>
-                  <div style={{ fontFamily: "monospace", fontSize: 11, color: C.amber,
-                    background: "#060a10", padding: "8px 10px", borderRadius: 6, marginBottom: 12,
-                    border: `1px solid ${C.amber}22`, whiteSpace: "pre-line" }}>{result}</div>
-                  <p style={{ margin: 0, fontSize: 12, color: C.textDim, lineHeight: 1.7, fontStyle: "italic" }}>{note}</p>
-                </div>
-              ))}
-            </div>
-
-            {/* General formula summary */}
-            <div style={panelStyle}>
-              <SectionTitle num="6.4" title="General Formula & Complete Phase Diagram" />
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
-                <div>
-                  <EqBlock label="CRITICAL COUPLING (GENERAL)">
-                    εc = A / [2(2A − B)]<br />
-                    <br />
-                    Valid when:<br />
-                    &nbsp; • sgn(B) ≠ sgn(A)  [frustrated]<br />
-                    &nbsp; • B ≠ 0             [on-site term present]<br />
-                    &nbsp; • A ≠ 0             [hopping present]
-                  </EqBlock>
-                  <EqBlock label="INCOMMENSURATE MODE (ε > εc)">
-                    cos k* = −(A + 2εB) / (4εA)<br />
-                    <br />
-                    k* → π  as  ε → εc⁺  (continuous)<br />
-                    k* → arccos(−B/2A)  as  ε → ∞
-                  </EqBlock>
-                </div>
-                <div>
-                  <div style={{ background: "#060a10", borderRadius: 8, padding: "14px 16px", border: `1px solid ${C.border}` }}>
-                    <div style={{ ...labelStyle, marginBottom: 12 }}>PHASE DIAGRAM SUMMARY</div>
-                    <table style={{ width: "100%", fontSize: 11, fontFamily: "monospace", borderCollapse: "collapse" }}>
-                      <tbody>
-                        {[
-                          ["Condition", "Phase", "Stable k"],
-                          ["sgn(A)=sgn(B), ε≥0", "Ferromagnet", "k=0"],
-                          ["sgn(A)≠sgn(B), ε<εc", "Antiferromagnet", "k=π"],
-                          ["sgn(A)≠sgn(B), ε=εc", "Critical point", "k=π (marginal)"],
-                          ["sgn(A)≠sgn(B), ε>εc", "Incommensurate", "k=±k*(ε)"],
-                          ["A=0 or B=0", "Trivial", "k=0"],
-                        ].map((row, i) => (
-                          <tr key={i} style={{ borderBottom: `1px solid ${C.border}`, background: i===0 ? C.border : i%2 ? "#0a0f1a" : "transparent" }}>
-                            {row.map((cell, j) => (
-                              <td key={j} style={{
-                                padding: "6px 8px",
-                                color: i===0 ? C.textDim : j===1 ? C.amber : j===2 ? C.green : C.text,
-                                fontWeight: i===0 ? 600 : 400,
-                              }}>{cell}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-
-                  <div style={{ marginTop: 14, background: C.amber + "0a", borderRadius: 8, padding: "14px 16px",
-                    border: `1px solid ${C.amber}22` }}>
-                    <div style={{ ...labelStyle, color: C.amberDim, marginBottom: 8 }}>UNIVERSAL PROPERTIES</div>
-                    <div style={{ fontSize: 12, color: C.text, lineHeight: 1.8, fontFamily: "Georgia, serif" }}>
-                      • Exponent ν = 1/2 (mean-field, <em>exact</em>)<br />
-                      • Supercritical pitchfork (Z₂ symmetry class)<br />
-                      • k* continuous at εc (no first-order jump)<br />
-                      • Result independent of sgn(A), sgn(B) magnitudes<br />
-                      • Only condition: sgn(A) ≠ sgn(B), B ≠ 0
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
 
-      {/* ── FOOTER ─────────────────────────────────────────────────────────── */}
-      <div style={{ borderTop: `1px solid ${C.border}`, padding: "16px 40px",
-        background: "#0a0f1a", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ fontFamily: "monospace", fontSize: 10, color: C.textDim, letterSpacing: "0.1em" }}>
-          FRUSTRATED 1D CML · CANONICAL ENSEMBLE · INCOMMENSURATE ORDER TRANSITION
+      {/* FOOTER */}
+      <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 28px", display:"flex", justifyContent:"space-between" }}>
+        <span style={{ fontSize:8, letterSpacing:"0.14em", color:C.muted, textTransform:"uppercase" }}>
+          CML | ec = A/[2(2A-B)] | cos(k*) = -(A+2eB)/(4eA) | nu=1/2 exact
         </span>
-        <span style={{ fontFamily: "monospace", fontSize: 10, color: C.textDim }}>
-          εc = A/[2(2A−B)] · ν = 1/2 · Z₂ pitchfork
+        <span style={{ fontSize:8, color:C.muted }}>
+          Fixes: B=-1/sqrt(2) exact | A=u21*sqrt(2) | Step2 no spurious /sqrt(2)
         </span>
       </div>
     </div>
